@@ -166,6 +166,7 @@ class GaussianDiffusion(nn.Module):
         self.sampler = sampler
 
         self.diffusion_model = model
+
         if self.diffusion_model.class_conditional:
             if self.diffusion_model.class_unconditional_prob > 0:
                 self.class_unconditional_bernoulli = torch.distributions.Bernoulli(probs=self.diffusion_model.class_unconditional_prob)
@@ -193,6 +194,7 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'invalid noise schedule {train_schedule}')
         
+
         self.train_schedule = partial(time_to_alpha, alpha_schedule=alpha_schedule, scale=scale)
 
         # Sampling schedule
@@ -894,7 +896,7 @@ class Trainer(object):
                 for k, kwargs in constant.generate_kwargs.items():
                     if self.latent_model_path:
                         attention_mask = None
-                        encoder_output = BaseModelOutput(last_hidden_state=self.bart_model.get_decoder_input(latents.clone()))
+                        encoder_output = BaseModelOutput(last_hidden_state=self.bart_model.decode_latent(latents.clone()))
                     else:
                         attention_mask = mask.clone()
                         encoder_output = BaseModelOutput(last_hidden_state=latents.clone())
@@ -991,7 +993,7 @@ class Trainer(object):
                     latents = self.ema.ema_model.unnormalize_latent(latents)
                 if self.latent_model_path:
                     attention_mask = None
-                    encoder_output = BaseModelOutput(last_hidden_state=self.bart_model.get_decoder_input(latents.clone()))
+                    encoder_output = BaseModelOutput(last_hidden_state=self.bart_model.decode_latent(latents.clone()))
                 else:
                     attention_mask = mask.clone()
                     encoder_output = BaseModelOutput(last_hidden_state=latents.clone())
@@ -1156,50 +1158,43 @@ class Trainer(object):
                 decoding_loss = 0.
                 for grad_accum_step in range(self.gradient_accumulate_every):
                     data = next(self.data_iter).to(device)
+
+
                     with torch.no_grad():
-                        encoder_outputs = self.bart_model.get_encoder()(input_ids = data['input_ids'], attention_mask = data['attention_mask'])
-                        if self.using_latent_model:
-                            latent = self.bart_model.get_diffusion_latent(encoder_outputs, data['attention_mask'])      
-                        else:                      
-                            latent = encoder_outputs.last_hidden_state
+                        latent = self.bart_model.bart_autoencode(input_ids = data['input_ids'], attn_mask = data['attention_mask'])
                         
-                        if self.args.normalize_latent:
-                            if self.step==0 and grad_accum_step==0:
-                                if self.using_latent_model:
-                                    latent_vecs = rearrange(latent, 'b s d -> (b s) d')
-                                else:
-                                    latent_vecs = torch.cat([latent[i][:torch.sum(data['attention_mask'][i])] for i in range(latent.shape[0])], dim=0)
+                        # if self.args.normalize_latent:
+                        #     if self.step==0 and grad_accum_step==0:
+                        #         if self.using_latent_model:
+                        #             latent_vecs = rearrange(latent, 'b s d -> (b s) d')
+                        #         else:
+                        #             latent_vecs = torch.cat([latent[i][:torch.sum(data['attention_mask'][i])] for i in range(latent.shape[0])], dim=0)
                                 
-                                # Add mean stats to model and EMA wrapper
-                                self.diffusion.latent_mean = torch.mean(latent_vecs, dim=0)
-                                self.ema.ema_model.latent_mean = self.diffusion.latent_mean
+                        #         # Add mean stats to model and EMA wrapper
+                        #         self.diffusion.latent_mean = torch.mean(latent_vecs, dim=0)
+                        #         self.ema.ema_model.latent_mean = self.diffusion.latent_mean
 
-                                # Add var stats to model and EMA wrapper
-                                self.diffusion.latent_scale = torch.std(latent_vecs-self.diffusion.latent_mean, unbiased=False)
+                        #         # Add var stats to model and EMA wrapper
+                        #         self.diffusion.latent_scale = torch.std(latent_vecs-self.diffusion.latent_mean, unbiased=False)
 
-                                self.ema.ema_model.latent_scale = self.diffusion.latent_scale
-                            latent = self.diffusion.normalize_latent(latent)
+                        #         self.ema.ema_model.latent_scale = self.diffusion.latent_scale
+                        #     latent = self.diffusion.normalize_latent(latent)
                         
-                    seq2seq_cond = None
-                    seq2seq_mask = None
-                    with accelerator.autocast():
-                        if self.seq2seq and random.random() < (1-self.seq2seq_unconditional_prob):
-                            if self.num_devices > 1:
-                                seq2seq_cond = self.diffusion.module.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
-                            else:
-                                seq2seq_cond = self.diffusion.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
-                            seq2seq_mask = data['cond_attention_mask'].bool()
-
-                    if self.using_latent_model:
-                        mask = torch.ones(latent.shape[0], self.num_encoder_latents, dtype=torch.bool).to(device)
-                    else:
-                        mask = data['attention_mask'].bool()
-                    if self.decoding_loss:
-                        raise NotImplementedError
-                    else:
-                        loss = self.diffusion(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
-                        loss = loss / self.gradient_accumulate_every
-                        total_loss += loss.item()
+                    # seq2seq_cond = None
+                    # seq2seq_mask = None
+                    # with accelerator.autocast():
+                    #     if self.seq2seq and random.random() < (1-self.seq2seq_unconditional_prob):
+                    #         if self.num_devices > 1:
+                    #             seq2seq_cond = self.diffusion.module.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
+                    #         else:
+                    #             seq2seq_cond = self.diffusion.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
+                    #         seq2seq_mask = data['cond_attention_mask'].bool()
+                    
+                    mask = torch.ones((latent.shape[0], latent.shape[1]), dtype=torch.bool).to(device)
+                    loss = self.diffusion(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+                    loss = loss / self.gradient_accumulate_every
+                    
+                    total_loss += loss.item()
                     self.accelerator.backward(loss)                
 
                 accelerator.clip_grad_norm_(self.diffusion.parameters(), self.args.clip_grad_norm)
@@ -1234,31 +1229,34 @@ class Trainer(object):
                             total_val_ema_loss = 0.
                             for grad_accum_step in range(self.gradient_accumulate_every):
                                 data = next(self.val_iter).to(device)
+                                latent = self.bart_model.bart_autoencode(input_ids = data['input_ids'], attn_mask = data['attention_mask'])
+
+
+                                # encoder_outputs = self.bart_model.get_encoder()(input_ids = data['input_ids'], attention_mask = data['attention_mask'])
+                                # if self.using_latent_model:
+                                #     latent = self.bart_model.get_diffusion_latent(encoder_outputs, data['attention_mask'])      
+                                # else:                      
+                                #     latent = encoder_outputs.last_hidden_state
                                 
-                                encoder_outputs = self.bart_model.get_encoder()(input_ids = data['input_ids'], attention_mask = data['attention_mask'])
-                                if self.using_latent_model:
-                                    latent = self.bart_model.get_diffusion_latent(encoder_outputs, data['attention_mask'])      
-                                else:                      
-                                    latent = encoder_outputs.last_hidden_state
-                                
-                                if self.args.normalize_latent:
-                                    latent = self.diffusion.normalize_latent(latent)
+                                # if self.args.normalize_latent:
+                                #     latent = self.diffusion.normalize_latent(latent)
                                 
                                 seq2seq_cond = None
                                 seq2seq_mask = None
                                 if self.seq2seq and random.random() < (1-self.seq2seq_unconditional_prob):
                                     with torch.no_grad():
+                                        
+
                                         if self.num_devices > 1:
                                             seq2seq_cond = self.diffusion.module.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
                                         else:
                                             seq2seq_cond = self.diffusion.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
                                     seq2seq_mask = data['cond_attention_mask'].bool()
                                 
-                                if self.using_latent_model:
-                                    mask = torch.ones((latent.shape[0], self.num_encoder_latents), dtype=torch.bool).to(device)
-                                else:
-                                    mask = data['attention_mask'].bool()
+                                mask = torch.ones((latent.shape[0], latent.shape[1]), dtype=torch.bool).to(device)
+
                                 loss = self.diffusion(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+
                                 loss = loss / self.gradient_accumulate_every
                                 total_val_loss += loss.item()
                                 loss = self.ema.ema_model(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
@@ -1269,8 +1267,10 @@ class Trainer(object):
                             logs["val_ema_loss"] = total_val_ema_loss
                             pbar.set_postfix(**logs)  
                         self.diffusion.train()
+
                     accelerator.log(logs, step=self.step)              
                     if self.step % self.save_and_sample_every == 0:
+
                         if self.seq2seq:
                             if 'wmt' in self.args.dataset_name:
                                 for guidance_strength in [1.0, 2.0]:
@@ -1280,12 +1280,14 @@ class Trainer(object):
                             self.sample_seq2seq(split='train')
                         else:
                             self.sample()
+                        
                         if self.class_conditional:
                             for class_id in range(self.diffusion.diffusion_model.num_classes):
                                 self.sample(num_samples=100, class_id=class_id)
-                        self.save()
                         
+                        self.save()
                         self.diffusion.train() 
+                
                 pbar.update(1)
             accelerator.wait_for_everyone()
         self.save()

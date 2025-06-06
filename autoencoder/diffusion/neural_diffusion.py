@@ -9,8 +9,8 @@ from typing import Tuple, Optional
 
 
 class DiTConfig:
-    sequence_length = 256 
-    input_dim = 12         
+    num_latents = 32 
+    latent_dim = 768         
     
     dim = 512              
     num_layers = 12
@@ -29,7 +29,7 @@ class RoPE(nn.Module):
         assert dim % 2 == 0, "Dimension must be even for RoPE."
         
         theta = 1.0 / (cfg.rope_base ** (torch.arange(0, dim, 2).float() / dim))
-        seq_idx = torch.arange(cfg.sequence_length).float()
+        seq_idx = torch.arange(cfg.num_latents).float()
         
         idx_theta = torch.einsum("n,d->nd", seq_idx, theta)
         freqs_cis = torch.polar(torch.ones_like(idx_theta), idx_theta)
@@ -93,8 +93,8 @@ class TimestepEmbedder(nn.Module):
 class InputProjector(nn.Module):
     def __init__(self, cfg: DiTConfig):
         super().__init__()
-        self.proj = nn.Linear(cfg.input_dim, cfg.dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, cfg.sequence_length, cfg.dim))
+        self.proj = nn.Linear(cfg.latent_dim, cfg.dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, cfg.num_latents, cfg.dim)) # TODO maybe remove this?
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
@@ -217,10 +217,19 @@ class DiTBlock(nn.Module):
 
 class DiTModel(nn.Module):
 
-    def __init__(self, cfg: DiTConfig):
+    def __init__(self, 
+                 cfg: DiTConfig,
+                 class_conditional = False,
+                 num_classes = 0,  
+                 seq2seq = False, 
+                 ):
         super().__init__()
         self.cfg = cfg
         
+        self.class_conditional = class_conditional
+        self.num_classes = num_classes
+        self.seq2seq = seq2seq
+
         self.input_proj = InputProjector(cfg)
         self.ctx_proj = InputProjector(cfg)
 
@@ -229,7 +238,7 @@ class DiTModel(nn.Module):
         self.blocks = nn.ModuleList([DiTBlock(cfg) for _ in range(cfg.num_layers)])
         
         self.norm_out = nn.LayerNorm(cfg.dim, elementwise_affine=False)
-        self.proj_out = nn.Linear(cfg.dim, cfg.input_dim, bias=True)
+        self.proj_out = nn.Linear(cfg.dim, cfg.latent_dim, bias=True)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
         x = self.input_proj(x)
@@ -240,7 +249,7 @@ class DiTModel(nn.Module):
             x = block(x, t, ctx)
 
         x = self.norm_out(x)
-        x = self.proj_out(x) 
+        x = self.proj_out(x)
         
         return x
 
@@ -253,7 +262,7 @@ if __name__ == '__main__':
     model = DiTModel(config).to(config.dev)
     
     # Create a dummy input batch
-    x_in = torch.randn(16, config.sequence_length, config.input_dim, device=config.dev)
+    x_in = torch.randn(16, config.num_latents, config.latent_dim, device=config.dev)
     
     ctx = torch.randn_like(x_in)
 

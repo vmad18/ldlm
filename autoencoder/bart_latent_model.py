@@ -62,7 +62,13 @@ class LatentAEModel(BartForConditionalGeneration):
                  num_dev: int = 1) -> None: 
         super().__init__(config) 
 
-        self.ae = AutoEncoder(LatentEncoderConfig(), LatentDecoderConfig())
+        cfg_enc = LatentEncoderConfig()
+        cfg_dec = LatentDecoderConfig()
+
+        self.ae = AutoEncoder(cfg_enc, cfg_dec)
+
+        self.num_latents = cfg_enc.num_latents
+
         self.num_dev = num_dev
         self.freeze = ctx
 
