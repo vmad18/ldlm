@@ -6,7 +6,7 @@ from datasets import load_dataset, Value
 from torch.utils.data import Dataset, DataLoader 
 from transformers import PreTrainedTokenizerBase, default_data_collator
 
-from collator import DataCollatorForBartDenoisingLM 
+from .collator import DataCollatorForBartDenoisingLM 
 
 def exists(x):
     return x is not None
@@ -141,13 +141,14 @@ def get_dataloader(args, dataset, model_config, tokenizer, max_seq_len, mode='di
         else:
             text = example["text"]
         return tokenizer(text, padding="max_length", truncation=True, max_length=max_seq_len)
-
-    if 'mbart' in args.enc_dec_model:
-        collate_fn=default_data_collator
-    elif 'bart' in args.enc_dec_model:
-        collate_fn=DataCollatorForBartDenoisingLM(tokenizer, model_config.decoder_start_token_id)
-    else:
-        raise NotImplementedError
+    
+    collate_fn=DataCollatorForBartDenoisingLM(tokenizer, model_config.decoder_start_token_id)
+    # if 'mbart' in args.enc_dec_model:
+    #     collate_fn=default_data_collator
+    # elif 'bart' in args.enc_dec_model:
+        
+    # else:
+    #     raise NotImplementedError
     
     if args.dataset_name in {'xsum', 'qqp'} or 'wmt14' in args.dataset_name:
         dataset = dataset.map(tokenization, remove_columns=['text', 'context'], batched=True, num_proc=None)
@@ -157,7 +158,7 @@ def get_dataloader(args, dataset, model_config, tokenizer, max_seq_len, mode='di
     dl = DataLoader(
             dataset,
             collate_fn=collate_fn,
-            batch_size=args.train_batch_size,
+            batch_size=args.train_bs,
             shuffle=shuffle,
             pin_memory = True,
             num_workers = 4

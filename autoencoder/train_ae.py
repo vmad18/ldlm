@@ -35,6 +35,21 @@ from bart_latent_model import LatentAEModel, get_latent_ae_tokenizer
 
 import wandb
 
+from datetime import datetime
+
+import evaluation
+
+
+generate_kwargs = {
+    'beam': 
+    {'max_length':64, 'min_length':5, 'do_sample':False, 'num_beams':4, 'no_repeat_ngram_size':3, 'repetition_penalty':1.2},
+    'nucleus':
+    {'max_length':64, 'min_length':5, 'do_sample':True, 'top_p':.95, 'num_beams':1, 'no_repeat_ngram_size':3, 'repetition_penalty':1.2}}
+
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 
 def exists(x):
     return x is not None
@@ -92,6 +107,7 @@ def compute_grad_norm(parameters):
     total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), p=2) for p in parameters]), p=2).item()
     return total_norm
 
+
 def get_output_dir(args):
     model_dir = f'{Path(args.dataset_name).stem}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
     output_dir = os.path.join(args.save_dir, model_dir)
@@ -117,6 +133,7 @@ class Trainer(object):
                  eval_every=1000,
                  results_folder="./results",
                  mixed_percision="no",
+                 grad_accumulate: int = 4,
                  seed=412,
                  ) -> None:
         super().__init__()
@@ -130,7 +147,7 @@ class Trainer(object):
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
-            # mixed_percision = mixed_percision, 
+            mixed_percision = mixed_percision, 
             log_with="wandb",
             kwargs_handlers=[ddp_kwargs]
         )
@@ -150,17 +167,16 @@ class Trainer(object):
             else:
                 self.accelerator.init_trackers(run, config=args, init_kwargs={"wandb": {"dir": results_folder}})
 
-        if args.freeze:
+        if args.freeze_bb == "freeze":
+            print("Freezing BART Backbone")
             ctx = torch.no_grad()
         else:
             ctx = nullcontext()
 
-        self.model, self.tokenizer, config = get_latent_ae_tokenizer(ctx)
-
+        self.model, self.tokenizer, config = get_latent_ae_tokenizer(args, ctx, self.num_dev)
         self.model: LatentAEModel = self.model
-
         self.model.compile()
-
+        
         num_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         if self.accelerator.is_main_process:
             self.accelerator.print(f'num trainable params: {num_trainable_params}')
@@ -177,7 +193,7 @@ class Trainer(object):
         if args.eval:
             self.dataset["train"] = self.dataset["train"].select(range(1000))
 
-        self.data_loader = get_dataloader(args, self.dataset["train"], config, self.tokenizer, args.max_seq_len,
+        self.dataloader = get_dataloader(args, self.dataset["train"], config, self.tokenizer, args.max_seq_len,
                                           context_tokenizer=self.tokenizer)
         self.val_dataloader = get_dataloader(args, self.dataset['valid'], config, self.tokenizer, args.max_seq_len,
                                              shuffle=False, context_tokenizer=self.tokenizer)
@@ -186,6 +202,8 @@ class Trainer(object):
         self.opt = get_adamw_optimizer(self.model.parameters(), lr=init_lr, betas=adam_betas,
                                        weight_decay=adam_weight_decay)
 
+        self.grad_accumulate = grad_accumulate
+        
         lr_scheduler = get_scheduler(
             lr_schedule,
             optimizer=self.opt,
@@ -201,6 +219,7 @@ class Trainer(object):
 
         self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
             self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
+        
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
 
@@ -235,6 +254,94 @@ class Trainer(object):
             for _ in range(self.step):
                 self.lr_scheduler.step()
 
+
+    def validation(self):
+        self.model.eval()
+        pred_text = {k:[] for k,_ in generate_kwargs.items()}    
+        bart_text = {k:[] for k,_ in generate_kwargs.items()}    
+        ref_text = []
+        accelerator = self.accelerator
+        device = self.accelerator.device
+        for batch in tqdm(self.val_dataloader):
+            for strategy in generate_kwargs.keys():
+                gen_kwargs = generate_kwargs[strategy]
+                gen_kwargs['max_length'] = self.max_seq_len
+                data = {k:v.to(device) for k,v in batch.items()}
+                # Compute generated language
+
+                enc_outs = self.model.bart_autoencode(input_ids = data["input_ids"], attn_mask = data["attention_mask"])
+
+                if self.num_dev > 1:
+                    sample_ids = self.model.module.generate(encoder_outputs=enc_outs, **gen_kwargs)
+                else:
+                    sample_ids = self.model.generate(encoder_outputs=enc_outs, **gen_kwargs)
+                
+                # Pad sample_ids to max_seq_len
+                sample_ids = F.pad(sample_ids, (0, self.max_seq_len - sample_ids.shape[-1]), value=self.tokenizer.pad_token_id)
+                gathered_sample_ids = accelerator.gather(sample_ids).to('cpu')
+                texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_sample_ids]
+                pred_text[strategy].extend(texts_list)
+
+                # Compute BART language
+                if self.num_dev > 1:
+                    sample_ids2 = self.model.module.generate(input_ids = data['input_ids'], attention_mask = data['attention_mask'], **gen_kwargs)
+                else:
+                    sample_ids2 = self.model.generate(input_ids = data['input_ids'], attention_mask = data['attention_mask'], **gen_kwargs)
+                sample_ids2 = F.pad(sample_ids2, (0, self.max_seq_len - sample_ids2.shape[-1]), value=self.tokenizer.pad_token_id)
+                gathered_sample_ids2 = accelerator.gather(sample_ids2).to('cpu')
+                texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_sample_ids2]
+                bart_text[strategy].extend(texts_list)
+
+            # Store reference language
+            gathered_input_ids = accelerator.gather(data['input_ids']).to('cpu')
+            texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_input_ids]
+            ref_text.extend(texts_list)
+            if len(ref_text) > 1000:
+                break
+
+        if not self.accelerator.is_main_process:
+            return
+        # Compute metrics
+        metrics = {}
+        for strategy in generate_kwargs.keys():
+            # Compute BLEU score
+            metrics[f'autoencoder/{strategy}/bleu'] = evaluation.compute_bleu(pred_text[strategy], ref_text)
+            metrics[f'bart/{strategy}/bleu'] = evaluation.compute_bleu(bart_text[strategy], ref_text)
+            # Compute perplexity
+
+            if all(pred_text[strategy]):
+                metrics[f'autoencoder/{strategy}/perplexity'] = evaluation.compute_perplexity(pred_text[strategy])
+
+            if all(bart_text[strategy]):
+                metrics[f'bart/{strategy}/perplexity'] = evaluation.compute_perplexity(bart_text[strategy])
+
+            rouge_metrics = evaluation.compute_rouge(pred_text[strategy], ref_text)
+            for k,v in rouge_metrics.items():
+                metrics[f'autoencoder/{strategy}/{k}'] = v
+            rouge_metrics = evaluation.compute_rouge(bart_text[strategy], ref_text)
+            for k,v in rouge_metrics.items():
+                metrics[f'bart/{strategy}/{k}'] = v
+        metrics['reference/perplexity'] = evaluation.compute_perplexity(ref_text)
+         
+
+        accelerator.log(metrics, self.step)
+
+        # Log samples
+        # reference | strategy0/autoencoder | strategy0/bart | strategy1/autoencoder | strategy1/bart | ...
+        columns = ['reference'] + [f'{strategy}/autoencoder' for strategy in generate_kwargs.keys()] + [f'{strategy}/bart' for strategy in generate_kwargs.keys()]
+        data = []
+        for i in range(len(ref_text)):
+            row = [ref_text[i]]
+            for strategy in generate_kwargs.keys():
+                row.append(pred_text[strategy][i])
+            
+            for strategy in generate_kwargs.keys():
+                row.append(bart_text[strategy][i])
+            data.append(row)
+        table = wandb.Table(columns=columns, data=data)
+        accelerator.log({f"Samples": table}, self.step)
+
+    
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
@@ -243,19 +350,17 @@ class Trainer(object):
         with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
             while self.step < self.train_num_steps:
                 total_loss = 0.
+                # for i in range(self.grad_accumulate):
                 data = {k: v.to(device) for k, v in next(self.data_iter).items()}
                 with accelerator.autocast():
-
-                    enc_outs = self.model.bart_autoencode(data["input_ids"], attn_mask=data["attention_mask"],
-                                                          num_dev=self.num_dev)
-
+                    enc_outs = self.model.bart_autoencode(data["input_ids"], attn_mask=data["attention_mask"])
                     loss = self.model(labels=data['labels'], encoder_outputs=enc_outs).loss
 
                 total_loss += loss.item()
                 self.accelerator.backward(loss)
-
+    
                 accelerator.wait_for_everyone()
-
+                
                 grad_norm = compute_grad_norm(self.model.parameters())
 
                 accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -275,11 +380,10 @@ class Trainer(object):
                         total_lm_val_loss = 0.
                         data = {k: v.to(device) for k, v in next(self.val_iter).items()}
 
-                        enc_outs = self.model.bart_autoencode(data["input_ids"], attn_mask=data["attention_mask"],
-                                                              num_dev=self.num_dev)
+                        enc_outs = self.model.bart_autoencode(data["input_ids"], attn_mask=data["attention_mask"])
 
                         loss = self.model(labels=data['labels'], encoder_outputs=enc_outs).loss
-                        if self.args.lm_mode == 'freeze':
+                        if self.args.freeze_bb == 'freeze':
                             total_lm_val_loss += self.model(input_ids=data['input_ids'],
                                                             attention_mask=data['attention_mask'],
                                                             labels=data['labels']).loss.item()
@@ -289,7 +393,7 @@ class Trainer(object):
                                 "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
                                 "epoch": (self.step) / len(self.dataloader),
                                 "samples": self.step * self.train_bs * self.num_dev}
-                        if self.args.lm_mode == 'freeze':
+                        if self.args.freeze_bb == 'freeze':
                             logs["val/lm_loss"] = total_lm_val_loss
                         pbar.set_postfix(**logs)
 
@@ -303,13 +407,13 @@ class Trainer(object):
                     accelerator.log(logs, step=self.step)
 
                 if self.step % self.eval_every == 0:
-                    # self.validation()
+                    self.validation()
                     accelerator.wait_for_everyone()
                     self.save()
                     self.model.train()
 
                 pbar.update(1)
-        # self.validation()
+        self.validation()
         self.save()
 
         accelerator.print('training complete')
