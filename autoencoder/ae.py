@@ -5,10 +5,9 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from math import sqrt, log  
 
-from typing import Tuple
+from typing import Tuple, Optional
 
 class Config:
-
 
     def __init__(self,
             dim: int = 1024,
@@ -205,7 +204,7 @@ class PerceiverAttention(nn.Module):
 
         self.proj_o = nn.Linear(inner_dim, cfg.latent_dim, device=cfg.dev)
 
-    def forward(self, x: torch.Tensor, latents: torch.Tensor, mask = None):
+    def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None):
         x = self.pre_norm(x) 
         latents = self.latent_norm(latents) 
 
@@ -242,7 +241,7 @@ class AutoEncodingBlock(nn.Module):
         self.ln1 = nn.LayerNorm(cfg.dim, device = cfg.dev)
         self.ln2 = nn.LayerNorm(cfg.latent_dim, device = cfg.dev) 
 
-    def forward(self, x: torch.Tensor, latents: torch.Tensor, mask = None) -> Tuple[torch.Tensor, torch.Tensor]: 
+    def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]: 
         latents = self.attn(x, latents, mask) + latents
         x_trans = self.ffn1(self.ln1(x)) + x 
         latents = self.ffn2(self.ln2(latents)) + latents 
@@ -267,7 +266,7 @@ class PerceiverResampler(nn.Module):
         self.f_attn = PerceiverAttention(cfg)
         self.latent_norm = nn.LayerNorm(cfg.latent_dim, device = cfg.dev)
 
-    def forward(self, x: torch.Tensor, mask = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, *_ = x.shape
 
         x = x + self.pos_embed(x)
@@ -280,61 +279,49 @@ class PerceiverResampler(nn.Module):
 
 
 class VariationalAutoEncoder(nn.Module):
-    def __init__(self, cfg_enc: object, cfg_dec: object) -> None:
-        """
-        cfg_enc: Configuration for the encoder (e.g., PerceiverResampler)
-        cfg_dec: Configuration for the decoder (e.g., PerceiverResampler)
-        """
+    def __init__(self, cfg_enc: Config, cfg_dec: Config) -> None:
         super().__init__()
 
         self.encoder = PerceiverResampler(cfg_enc)
         self.decoder = PerceiverResampler(cfg_dec)
         
-
-        # Projection heads for mean and log-variance
         self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
 
-    def encode(self, x: torch.Tensor, mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encodes the input and returns the mean and log-variance vectors."""
-        # Get the single feature vector from the encoder
         enc_output = self.encoder(x, mask)
         
-        # Project the encoder output to mu and log_var
         mu, log_var = self.mu_lsigma(enc_output).chunk(dim=-1)
         
         return mu, log_var
 
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
-        """
-        Performs the reparameterization trick to sample from the latent space.
-        """
-        std = torch.exp(0.5 * log_var)  # Standard deviation
-        eps = torch.randn_like(std)     # Sample from a standard normal distribution
-        return mu + eps * std           # Compute the latent vector z
+    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, only_mu: bool = False) -> torch.Tensor:
+        std = torch.exp(0.5 * log_var)  
+        eps = torch.randn_like(std)     
+        if only_mu:
+            return mu 
+        return mu + eps * std           # compute the latent vector z
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
-        """Decodes the latent vector back to the original data space."""
         return self.decoder(latents)
 
-    def loss_function(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
-        """
-        Calculates the VAE loss, which is a sum of reconstruction loss and KL divergence.
-        """
-        # 1. Reconstruction Loss (using Mean Squared Error here)
-        recon_loss = F.mse_loss(recon_x, x, reduction='sum')
+    def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+        recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
 
-        # 2. KL Divergence Loss
-        # Measures how much the learned distribution differs from a standard normal distribution.
         kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
 
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Defines the full forward pass of the VAE.
-        """
+    def cont_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+        recon_loss = F.mse_loss(recon_x, x, reduction='sum')
+        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+        total_loss = recon_loss + kld_loss
+        
+        return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
+    
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
         z = self.reparameterize(mu, log_var)
         recon_x = self.decode(z)

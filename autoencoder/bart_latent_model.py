@@ -100,7 +100,7 @@ class LatentAEModel(BartForConditionalGeneration):
         recon_encs, mu, log_var = self.ae(bart_encodings[0], attn_mask.bool())
         recon_encs = recon_encs[..., :s, :]
         bart_encodings["last_hidden_state"] = recon_encs
-        return bart_encodings, self.ae.loss_function(recon_encs, bart_encodings[0], mu, log_var)
+        return bart_encodings, self.ae.cont_loss_func(recon_encs, bart_encodings[0], mu, log_var)
 
 
 def get_latent_ae_tokenizer(args, ctx, num_dev: int = 1) -> Tuple[LatentAEModel, PreTrainedTokenizerBase, PretrainedConfig]:

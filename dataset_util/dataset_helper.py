@@ -3,10 +3,10 @@ import os
 import json
 
 from datasets import load_dataset, Value 
-from torch.utils.data import Dataset, DataLoader 
+from torch.utils.data import Dataset, DataLoader, DatasetDict
 from transformers import PreTrainedTokenizerBase, default_data_collator
 
-from .collator import DataCollatorForBartDenoisingLM 
+from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE
 
 def exists(x):
     return x is not None
@@ -53,10 +53,22 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
         dataset['valid'] = dataset['validation']
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'en-en')
+    elif dataset_name == "fineweb-edu_10b":
+        dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b")
+        dataset = process_fineweb_edu(dataset)
     else:
         raise NotImplementedError
     return dataset
 
+
+def process_fineweb_edu(dataset):
+    dataset = dataset['train']
+    split_datasets = dataset.train_test_split(test_size=0.1, seed=42)
+    dataset = DatasetDict({
+        'train': split_datasets['train'],
+        'validation': split_datasets['test']
+    })
+    return dataset
 
 def process_roc_dataset(dataset):
     def extract_roc_text(example):
@@ -160,6 +172,32 @@ def get_dataloader(args, dataset, model_config, tokenizer, max_seq_len, mode='di
             collate_fn=collate_fn,
             batch_size=args.train_bs,
             shuffle=shuffle,
+            pin_memory = True,
+            num_workers = 4
+        )
+    return dl
+
+
+
+def get_dataloader_lvae(args,
+                        dataset, 
+                        tokenizer, 
+                        max_seq_len, 
+                        mode='diffusion', 
+                        shuffle=True, 
+                        context_tokenizer=None):
+    def tokenization(example):
+        text = example["text"]
+        return tokenizer(text, padding="max_length", truncation=True, max_length=max_seq_len)
+    
+    collate_fn = DataCollatorForLatentVAE(tokenizer)
+
+    dataset = dataset.map(tokenization, remove_columns='text')   
+    dl = DataLoader(
+            dataset,
+            collate_fn = collate_fn,
+            batch_size = args.train_bs,
+            shuffle = shuffle,
             pin_memory = True,
             num_workers = 4
         )
