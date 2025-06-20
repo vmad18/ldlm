@@ -53,11 +53,7 @@ class DataCollatorForLatentVAE:
     tokenizer: PreTrainedTokenizerBase
     # decoder_start_token_id: int
 
-    def __call__(self, examples: List[Dict[str, List[int]]]) -> BatchEncoding:
-        for i in range(len(examples)):
-            del examples[i]["id"]
-            del examples[i]["metadata"]
-        
+    def __call__(self, examples: List[Dict[str, List[int]]]) -> BatchEncoding:        
         batch = BatchEncoding(
             {k: torch.LongTensor([examples[i][k] for i in range(len(examples))]) for k in examples[0].keys()}
         )

@@ -1,4 +1,3 @@
-
 import numpy as np
 
 import torch.nn.functional as F
@@ -8,23 +7,23 @@ import json
 
 import sys
 
-from autoencoder.train_ae import Trainer 
+from autoencoder.train_lvae import Trainer 
 import argparse
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", type=str, default="fineweb-edu_10b")
     parser.add_argument("--max_seq_len", type=int, default=2048)
-    parser.add_argument("--train_bs", type=int, default=128) # 196
-    parser.add_argument("--eval_bs", type=int, default=64)
+    parser.add_argument("--train_bs", type=int, default=16)
+    parser.add_argument("--eval_bs", type=int, default=8)
 
-    parser.add_argument("--d_model", type=int, default=1024)
-    parser.add_argument("--latent_dim", type=int, default=1536) # 196
+    parser.add_argument("--d_model", type=int, default=768)
+    parser.add_argument("--latent_dim", type=int, default=1536)
     parser.add_argument("--num_latents", type=int, default=32)
 
     parser.add_argument("--dim_head", type=int, default=128)
-    parser.add_argument("--max_tokens", type=int, default=2048) # 196
-    parser.add_argument("--num_layers", type=int, default=8)
+    parser.add_argument("--num_layers", type=int, default=4)
 
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default="saved_latent_models")
@@ -69,4 +68,3 @@ def main():
 
 if __name__ == "__main__":
     main() 
-

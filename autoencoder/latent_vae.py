@@ -7,7 +7,7 @@ from einops import rearrange, repeat
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from ae import VariationalAutoEncoder, Config, create_enc_dec_cfg
+from .ae import VariationalAutoEncoder, Config, create_enc_dec_cfg
 from contextlib import nullcontext
 from typing import Tuple, Optional
 
@@ -53,7 +53,7 @@ class LatentDecoderConfig(Config):
     dev = "cuda"
 
 
-class LatentVAEModel: 
+class LatentVAEModel(nn.Module): 
 
     def __init__(self, 
                  vocab_size: int, 
@@ -113,6 +113,9 @@ class LatentVAEModel:
         recon_encs = self.dembed_head(recon_encs[..., :s, :])
         return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), input_ids.view(-1), mu, log_var)
 
+    def forward(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
+        return self.autoencode(input_ids, attn_mask)
+    
 
 def get_latent_vae_tokenizer(args, tokenizer_name: str = "meta-llama/Llama-3.2-1B") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -126,7 +129,7 @@ def get_latent_vae_tokenizer(args, tokenizer_name: str = "meta-llama/Llama-3.2-1
         latent_dim = args.latent_dim, 
         num_latents = args.num_latents, 
         dim_head = args.dim_head, 
-        max_tokens = args.max_tokens, 
+        max_tokens = args.max_seq_len, 
         layers_p = args.num_layers) 
     
     return vae, tokenizer 

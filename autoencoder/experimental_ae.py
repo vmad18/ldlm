@@ -34,8 +34,23 @@ class Config:
         self.base: int = base
         self.qk_norm: bool = qk_norm
 
+        # norm on sphere stuff
+        self.s_qk_init = 1.0 
+        self.s_qk_scale = 1.0 / (self.latent_dim ** 0.5)
+
+        self.alpha_attn_init = 0.05 
+        self.alpha_attn_scale = 1.0 / (self.latent_dim ** 0.5)
+
+        self.ffn_alpha_init_value = 0.05 
+        self.ffn_alpha_init_scaling = 1.0 / (self.latent_dim ** 0.5)
+
+        self.suv_init_value = 1.0 
+        self.suv_init_scaling = 1.0 
+
+
         self.layers_p = layers_p
         self.dev = dev
+
 
 class EncConfig(Config):
 
@@ -103,6 +118,17 @@ def create_enc_dec_cfg(
     return enc_cfg, dec_cfg
 
 
+class L2Norm(nn.Module): 
+
+    def __init__(self):
+        super().__init__() 
+
+    def forward(self, x: torch.Tensor, dim = -1) -> torch.Tensor:
+        dtype = x.dtype 
+        x = x.float() 
+        return (x / x.norm(p = 2, dim = dim, keepdim = True)).to(dtype)
+
+
 class RoPE(nn.Module):
 
     def __init__(self, cfg: Config, dim: int, scaling: float = 1., device ="cuda") -> None:
@@ -164,33 +190,54 @@ class AbsolutePositionalEmbedding(nn.Module):
         pos = torch.arange(s, device=x.device) 
         return self.embed(pos) * self.scale 
 
-class FeedForward(nn.Module):
+class NormFeedForward(nn.Module):
 
     def __init__(self, cfg: Config, dim: int) -> None:
         super().__init__()
-        self.proj_up = nn.Linear(dim, cfg.expansion_factor * dim, device = cfg.dev)
+        self.proj_up = nn.Linear(dim, 2 * cfg.expansion_factor * dim, device = cfg.dev)
         self.proj_down = nn.Linear(cfg.expansion_factor * dim, dim, device = cfg.dev)
 
+        self.cfg = cfg 
+        self.dim = dim 
+
+        self.l2_norm = L2Norm()
+
+        self.alpha = nn.Parameter(cfg.ffn_alpha_init_scaling * torch.ones(dim, dtype = torch.float32, device=cfg.dev))
+        self.suv = torch.nn.Parameter(self.cfg.suv_init_scaling * torch.ones(2 * cfg.expansion_factor * dim, dtype=torch.float32, device=cfg.dev))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor: 
-        x = self.proj_up(x) 
-        x = F.relu(x).square()
-        x = self.proj_down(x)
-        return x
+        uv = self.proj_up(x) 
+
+        suv = self.suv * (self.cfg.suv_init_value / self.cfg.suv_init_scaling) * (self.dim ** 0.5)
+        uv = suv * uv 
+
+        u, v = uv.chunk(2, dim = -1)
+        h_f = self.l2_norm(self.proj_down(u * F.silu(v)))
 
 
-class PerceiverAttention(nn.Module): 
+        interp = torch.abs(self.alpha * (self.cfg.ffn_alpha_init_value / self.cfg.ffn_alpha_init_scaling)) 
+
+        return self.l2_norm(x + interp * (h_f - x)) 
+
+
+class PerceiverNormAttention(nn.Module): 
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
        
+        self.cfg = cfg
+
         inner_dim = max(cfg.dim, cfg.latent_dim)
-        
+        self.inner_dim = inner_dim
+
         self.scale = 1./sqrt(inner_dim)
 
         self.heads = inner_dim // cfg.dim_head
 
-        self.pre_norm = nn.LayerNorm(cfg.dim, device=cfg.dev)
-        self.latent_norm = nn.LayerNorm(cfg.latent_dim, device=cfg.dev) 
+        self.l2_norm = L2Norm()
+
+        self.s_qk = nn.Parameter(torch.ones(cfg.dim_head * self.heads, dtype=torch.float32, device=cfg.dev) * cfg.alpha_attn_init)
+        self.alpha = nn.Parameter(torch.ones(cfg.dim, dtype=torch.float32, device=cfg.dev) * cfg.alpha_attn_scale)
 
         self.proj_q_latent = nn.Linear(cfg.latent_dim, inner_dim, device=cfg.dev) 
         
@@ -205,15 +252,20 @@ class PerceiverAttention(nn.Module):
         self.proj_o = nn.Linear(inner_dim, cfg.latent_dim, device=cfg.dev)
 
     def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        x = self.pre_norm(x) 
-        latents = self.latent_norm(latents) 
+        # x = self.pre_norm(x) 
+        # latents = self.latent_norm(latents) 
 
         q_lat = self.proj_q_latent(latents) 
         kv_xl = torch.cat([self.proj_kv(x), self.proj_kv_latent(latents)], dim = -2)
 
         k, v = rearrange(kv_xl, "b s (l d) -> l b s d", l = 2)
         q, k, v = map(lambda t: rearrange(t, "b s (h d) -> b h s d", h = self.heads), (q_lat, k, v))
-       
+
+        s_qk = (self.s_qk * self.cfg.s_qk_init / self.cfg.s_qk_scale).view(1, self.inner_dim // self.cfg.dim_head, 1, self.cfg.dim_head)
+
+        q = self.l2_norm(q) * s_qk 
+        k = self.l2_norm(k) * s_qk
+
         if self.rope is not None:
             q, k = self.rope(q, k)
 
@@ -225,8 +277,12 @@ class PerceiverAttention(nn.Module):
             sim = sim.masked_fill(~mask, torch.finfo(sim.dtype).min)
 
         attn_score = F.softmax(sim, dim=-1, dtype=torch.float32).to(sim.dtype) 
-        out = rearrange((attn_score @ v), "b h s d -> b s (h d)", h = self.heads)
-        return self.proj_o(out)
+        
+        interp = torch.abs(self.alpha * (self.cfg.alpha_attn_init / self.cfg.alpha_attn_scale))
+
+        h_a = self.proj_o(rearrange((attn_score @ v), "b h s d -> b s (h d)", h = self.heads))
+
+        return self.l2_norm(latents + interp * (h_a - latents))  # mmm - SLERP 
 
 
 class AutoEncodingBlock(nn.Module):
@@ -234,21 +290,18 @@ class AutoEncodingBlock(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__() 
 
-        self.attn = PerceiverAttention(cfg) 
-        self.ffn1 = FeedForward(cfg, cfg.dim)
-        self.ffn2 = FeedForward(cfg, cfg.latent_dim)
-
-        self.ln1 = nn.LayerNorm(cfg.dim, device = cfg.dev)
-        self.ln2 = nn.LayerNorm(cfg.latent_dim, device = cfg.dev) 
+        self.attn = PerceiverNormAttention(cfg) 
+        self.ffn1 = NormFeedForward(cfg, cfg.dim)
+        self.ffn2 = NormFeedForward(cfg, cfg.latent_dim)
 
     def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]: 
-        latents = self.attn(x, latents, mask) + latents
-        x_trans = self.ffn1(self.ln1(x)) + x 
-        latents = self.ffn2(self.ln2(latents)) + latents 
+        latents = self.attn(x, latents, mask)
+        x_trans = self.ffn1(x)
+        latents = self.ffn2(latents)
 
         return x_trans, latents
 
-class PerceiverResampler(nn.Module): 
+class NormPerceiverResampler(nn.Module): 
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
@@ -263,8 +316,7 @@ class PerceiverResampler(nn.Module):
         for _ in range(cfg.layers_p):
             self.layers.append(AutoEncodingBlock(cfg))
 
-        self.f_attn = PerceiverAttention(cfg)
-        self.latent_norm = nn.LayerNorm(cfg.latent_dim, device = cfg.dev)
+        self.f_attn = PerceiverNormAttention(cfg)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, *_ = x.shape
@@ -275,15 +327,15 @@ class PerceiverResampler(nn.Module):
             x, latents = layer(x, latents, mask) 
         
         latents = self.f_attn(x, latents, mask)
-        return self.latent_norm(latents)
+        return latents
 
 
 class VariationalAutoEncoder(nn.Module):
     def __init__(self, cfg_enc: Config, cfg_dec: Config) -> None:
         super().__init__()
 
-        self.encoder = PerceiverResampler(cfg_enc)
-        self.decoder = PerceiverResampler(cfg_dec)
+        self.encoder = NormPerceiverResampler(cfg_enc)
+        self.decoder = NormPerceiverResampler(cfg_dec)
         
         self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
 
@@ -331,8 +383,7 @@ class VariationalAutoEncoder(nn.Module):
 if __name__ == "__main__":
     e_cfg = EncConfig()
     d_cfg = DecConfig()
-    attn = AutoEncoder(e_cfg, d_cfg)
+    attn = VariationalAutoEncoder(e_cfg, d_cfg)
     # latents = torch.randn((3, 16, 1024)).cuda()
-    x = torch.randn((3, 300, 512)).cuda()
-
-    print(attn(x).shape) 
+    x = torch.randn((3, 300, 1024)).cuda()
+    print(attn.encode(x)[0].norm(2, dim=-1)) 

@@ -24,12 +24,12 @@ from typing import Tuple
 from transformers import get_scheduler
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
-from dataset_util.dataset_helper import get_dataset, get_dataloader
+from dataset_util.dataset_helper import get_dataset, get_dataloader, get_dataloader_lvae
 
 from PIL import Image
 from tqdm.auto import tqdm
 
-from latent_vae import LatentVAEModel, get_latent_vae_tokenizer
+from .latent_vae import LatentVAEModel, get_latent_vae_tokenizer
 
 import wandb
 
@@ -130,7 +130,7 @@ class Trainer(object):
                  eval_every=1000,
                  results_folder="./results",
                  mixed_percision="no",
-                 grad_accumulate: int = 4,
+                 grad_accumulate: int = 16,
                  seed=412,
                  ) -> None:
         super().__init__()
@@ -185,22 +185,24 @@ class Trainer(object):
         if args.eval:
             self.dataset["train"] = self.dataset["train"].select(range(1000))
 
-        self.dataloader = get_dataloader(args, self.dataset["train"], config, self.tokenizer, args.max_seq_len,
+        self.dataloader = get_dataloader_lvae(args, self.dataset["train"], self.tokenizer, args.max_seq_len,
                                           context_tokenizer=self.tokenizer)
-        self.val_dataloader = get_dataloader(args, self.dataset['valid'], config, self.tokenizer, args.max_seq_len,
-                                             shuffle=False, context_tokenizer=self.tokenizer)
+        self.val_dataloader = get_dataloader_lvae(args, self.dataset['valid'], self.tokenizer, args.max_seq_len,
+                                             shuffle=False)
+        
         self.max_seq_len = args.max_seq_len
 
-        self.opt = get_adamw_optimizer(self.model.parameters(), lr=init_lr, betas=adam_betas,
-                                       weight_decay=adam_weight_decay)
+        self.opt = get_adamw_optimizer(self.model.parameters(), 
+                                       lr = init_lr, betas = adam_betas,
+                                       weight_decay = adam_weight_decay)
 
         self.grad_accumulate = grad_accumulate
         
         lr_scheduler = get_scheduler(
             lr_schedule,
-            optimizer=self.opt,
-            num_warmup_steps=num_warmup_steps * self.num_dev,
-            num_training_steps=train_num_steps * self.num_dev,
+            optimizer = self.opt,
+            num_warmup_steps = num_warmup_steps * self.num_dev,
+            num_training_steps = train_num_steps * self.num_dev,
         )
 
         if self.accelerator.is_main_process:
@@ -215,7 +217,7 @@ class Trainer(object):
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
 
-        self.vae_loss_weight = 0.005
+        self.kdl_weight = 1e-7
 
     def save(self):
         if not self.accelerator.is_main_process:
@@ -248,172 +250,81 @@ class Trainer(object):
             for _ in range(self.step):
                 self.lr_scheduler.step()
 
-
-    # def validation(self):
-    #     self.model.eval()
-    #     pred_text = {k:[] for k,_ in generate_kwargs.items()}    
-    #     bart_text = {k:[] for k,_ in generate_kwargs.items()}    
-    #     ref_text = []
-    #     accelerator = self.accelerator
-    #     device = self.accelerator.device
-    #     for batch in tqdm(self.val_dataloader):
-    #         for strategy in generate_kwargs.keys():
-    #             gen_kwargs = generate_kwargs[strategy]
-    #             gen_kwargs['max_length'] = self.max_seq_len
-    #             data = {k:v.to(device) for k,v in batch.items()}
-    #             # Compute generated language
-    #             enc_outs, loss = self.model.bart_autoencode(input_ids = data["input_ids"], attn_mask = data["attention_mask"])
-
-    #             if self.num_dev > 1:
-    #                 sample_ids = self.model.module.generate(encoder_outputs=enc_outs, **gen_kwargs)
-    #             else:
-    #                 sample_ids = self.model.generate(encoder_outputs=enc_outs, **gen_kwargs)
-                    
-    #             # Pad sample_ids to max_seq_len
-    #             sample_ids = F.pad(sample_ids, (0, self.max_seq_len - sample_ids.shape[-1]), value=self.tokenizer.pad_token_id)
-    #             gathered_sample_ids = accelerator.gather(sample_ids).to('cpu')
-    #             texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_sample_ids]
-    #             pred_text[strategy].extend(texts_list)
-
-    #             # Compute BART language
-    #             if self.num_dev > 1:
-    #                 sample_ids2 = self.model.module.generate(input_ids = data['input_ids'], attention_mask = data['attention_mask'], **gen_kwargs)
-    #             else:
-    #                 sample_ids2 = self.model.generate(input_ids = data['input_ids'], attention_mask = data['attention_mask'], **gen_kwargs)
-               
-    #             sample_ids2 = F.pad(sample_ids2, (0, self.max_seq_len - sample_ids2.shape[-1]), value=self.tokenizer.pad_token_id)
-    #             gathered_sample_ids2 = accelerator.gather(sample_ids2).to('cpu')
-    #             texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_sample_ids2]
-    #             bart_text[strategy].extend(texts_list)
-
-    #         # Store reference language
-    #         gathered_input_ids = accelerator.gather(data['input_ids']).to('cpu')
-    #         texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_input_ids]
-    #         ref_text.extend(texts_list)
-    #         if len(ref_text) > 1000:
-    #             break
-
-    #     if not self.accelerator.is_main_process:
-    #         return
-    #     # Compute metrics
-    #     metrics = {}
-    #     for strategy in generate_kwargs.keys():
-    #         # Compute BLEU score
-    #         metrics[f'autoencoder/{strategy}/bleu'] = evaluation.compute_bleu(pred_text[strategy], ref_text)
-    #         metrics[f'bart/{strategy}/bleu'] = evaluation.compute_bleu(bart_text[strategy], ref_text)
-    #         # Compute perplexity
-
-    #         if all(pred_text[strategy]):
-    #             metrics[f'autoencoder/{strategy}/perplexity'] = evaluation.compute_perplexity(pred_text[strategy])
-
-    #         if all(bart_text[strategy]):
-    #             metrics[f'bart/{strategy}/perplexity'] = evaluation.compute_perplexity(bart_text[strategy])
-
-    #         rouge_metrics = evaluation.compute_rouge(pred_text[strategy], ref_text)
-    #         for k,v in rouge_metrics.items():
-    #             metrics[f'autoencoder/{strategy}/{k}'] = v
-    #         rouge_metrics = evaluation.compute_rouge(bart_text[strategy], ref_text)
-    #         for k,v in rouge_metrics.items():
-    #             metrics[f'bart/{strategy}/{k}'] = v
-    #     metrics['reference/perplexity'] = evaluation.compute_perplexity(ref_text)
-         
-        
-    #     accelerator.log(metrics, self.step)
-
-    #     # Log samples
-    #     # reference | strategy0/autoencoder | strategy0/bart | strategy1/autoencoder | strategy1/bart | ...
-    #     columns = ['reference'] + [f'{strategy}/autoencoder' for strategy in generate_kwargs.keys()] + [f'{strategy}/bart' for strategy in generate_kwargs.keys()]
-    #     data = []
-    #     for i in range(len(ref_text)):
-    #         row = [ref_text[i]]
-    #         for strategy in generate_kwargs.keys():
-    #             row.append(pred_text[strategy][i])
-    #             print(pred_text[strategy][i])
-                
-    #         for strategy in generate_kwargs.keys():
-    #             row.append(bart_text[strategy][i])
-    #         data.append(row)
-
-        
-    #     table = wandb.Table(columns=columns, data=data)
-    #     accelerator.log({f"Samples": table}, self.step)
-
-
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
         self.model.train()
         
-        with tqdm(initial=self.step, total=self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
+        with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
             while self.step < self.train_num_steps:
-                total_loss = 0.
-                data = {k: v.to(device) for k, v in next(self.data_iter).items()}
-                with accelerator.autocast():
-                    losses = self.model.autoencode(data["input_ids"], attn_mask=data["attention_mask"])
-
-                    current_kld_weight = 1e-7 
-                    recon_loss = losses['reconstruction_loss']
-                    kld_loss = current_kld_weight * losses['kld_loss'] 
-                    loss = recon_loss + kld_loss
                 
-                total_loss += loss.item()
-                self.accelerator.backward(loss)
+                # Zero the gradients once before starting accumulation
+                self.opt.zero_grad()
+
+                total_loss = 0.
+
+                # Gradient accumulation loop
+                for _ in range(self.grad_accumulate):
+                    data = {k: v.to(device) for k, v in next(self.data_iter).items()}
+                    with accelerator.autocast():
+                        losses = self.model.autoencode(data["input_ids"], attn_mask=data["attention_mask"])
+
+                        recon_loss = losses['reconstruction_loss']
+                        kld_loss = self.kdl_weight * losses['kld_loss']
+                        
+                        # Normalize loss to account for accumulation
+                        loss = (recon_loss + kld_loss) / self.grad_accumulate
+                    
+                    total_loss += loss.item()
+                    self.accelerator.backward(loss)
     
                 accelerator.wait_for_everyone()
                 
+                # Gradient clipping and optimizer step are now performed once per accumulation cycle
                 grad_norm = compute_grad_norm(self.model.parameters())
-
-                accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+                accelerator.clip_grad_norm_(self.model.parameters(), 5.0)
+                
                 self.opt.step()
                 self.lr_scheduler.step()
-                self.opt.zero_grad()
 
                 accelerator.wait_for_everyone()
 
-                self.step += 1
-
-                # Log to WandB
-                if self.step % 50 == 0:
+                # --- Logging and Step Update ---
+                
+                # Log to WandB every 50 optimizer steps
+                if self.step % 50 == 0 and accelerator.is_main_process:
                     self.model.eval()
                     with torch.no_grad():
                         total_val_loss = 0.
-                        data = {k: v.to(device) for k, v in next(self.val_iter).items()}
-
-                        losses = self.model.autoencode(data["input_ids"], attn_mask=data["attention_mask"])
-
-                        current_kld_weight = 1e-7 
-                        recon_loss = losses['reconstruction_loss']
-                        kld_loss = current_kld_weight * losses['kld_loss'] 
-                        loss = recon_loss + kld_loss
-                
-                
-                        total_val_loss += loss.item()
+                        # Use a single validation batch for logging
+                        val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
+                        losses = self.model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"])
+                        
+                        # Note: We don't normalize validation loss as it's for evaluation
+                        val_loss = losses['reconstruction_loss'] + self.kdl_weight * losses['kld_loss']
+                        total_val_loss = val_loss.item()
 
                         logs = {"train/loss": total_loss, "val/loss": total_val_loss, "grad_norm": grad_norm,
                                 "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
-                                "epoch": (self.step) / len(self.dataloader),
-                                "samples": self.step * self.train_bs * self.num_dev, 
-                                "model_loss": loss.item(), }
+                                "epoch": (self.step * self.grad_accumulate) / len(self.dataloader),
+                                "samples": self.step * self.train_bs * self.num_dev * self.grad_accumulate
+                               }
                         pbar.set_postfix(**logs)
-
+                        accelerator.log(logs, step=self.step)
                     self.model.train()
                 else:
-                    logs = {"train/loss": total_loss, "grad_norm": grad_norm, "lr": self.lr_scheduler.get_last_lr()[0],
-                            "step": self.step, "epoch": (self.step) / len(self.dataloader),
-                            "samples": self.step * self.train_bs * self.num_dev, 
-                            "loss": loss.item(), }
+                    # Log training loss for other steps
+                    logs = {"train/loss": total_loss, 
+                            "grad_norm": grad_norm, 
+                            "lr": self.lr_scheduler.get_last_lr()[0]
+                           }
+                    if accelerator.is_main_process:
+                         accelerator.log(logs, step=self.step)
 
-                if accelerator.is_main_process:
-                    accelerator.log(logs, step=self.step)
 
-                # if self.step % self.eval_every == 0:
-                #     self.validation()
-                #     accelerator.wait_for_everyone()
-                #     self.save()
-                #     self.model.train()
-
+                self.step += 1
                 pbar.update(1)
 
-        # self.validation()
+        # self.validation() # Consider running a full validation loop here
         self.save()
         accelerator.print('training complete')

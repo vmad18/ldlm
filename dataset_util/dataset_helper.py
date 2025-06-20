@@ -3,10 +3,14 @@ import os
 import json
 
 from datasets import load_dataset, Value 
-from torch.utils.data import Dataset, DataLoader, DatasetDict
+from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerBase, default_data_collator
+from datasets import DatasetDict, Dataset
+
+from datasets import load_from_disk
 
 from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE
+
 
 def exists(x):
     return x is not None
@@ -54,22 +58,43 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'en-en')
     elif dataset_name == "fineweb-edu_10b":
-        dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b")
-        dataset = process_fineweb_edu(dataset)
+        dataset = process_fineweb_edu()
     else:
         raise NotImplementedError
     return dataset
 
 
-def process_fineweb_edu(dataset):
-    dataset = dataset['train']
-    split_datasets = dataset.train_test_split(test_size=0.1, seed=42)
-    dataset = DatasetDict({
-        'train': split_datasets['train'],
-        'validation': split_datasets['test']
-    })
-    return dataset
+def process_fineweb_edu(
+    split_ratio = 0.1,
+    output_dir="./fineweb_edu_splits/", # Directory to save/load splits
+    force_resplit=False # Option to force re-splitting even if files exist
+):
+    os.makedirs(output_dir, exist_ok=True)
+    split_dataset_path = os.path.join(output_dir, f"fineweb_edu_split_valid{int(split_ratio*100)}")
 
+    if os.path.exists(split_dataset_path) and not force_resplit:
+        print(f"Loading pre-split dataset from {split_dataset_path}")
+        loaded_ds_dict = DatasetDict.load_from_disk(split_dataset_path)
+        return loaded_ds_dict
+    else:
+        dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b")
+        print(f"Splitting dataset: fineweb-edu_10b. This may take some time for large datasets.")
+        dataset = dataset['train']
+        split_datasets = dataset.train_test_split(
+            test_size = split_ratio,
+            seed = 42
+        )
+
+        final_ds_dict = DatasetDict({
+            'train': split_datasets['train'],
+            'valid': split_datasets['test']
+        })
+        
+        print(f"Dataset split complete. Saving to {split_dataset_path}...")
+        final_ds_dict.save_to_disk(split_dataset_path)
+        print("Split dataset saved to disk.")
+        return final_ds_dict
+    
 def process_roc_dataset(dataset):
     def extract_roc_text(example):
         text = example['text']
@@ -178,27 +203,41 @@ def get_dataloader(args, dataset, model_config, tokenizer, max_seq_len, mode='di
     return dl
 
 
-
 def get_dataloader_lvae(args,
                         dataset, 
                         tokenizer, 
                         max_seq_len, 
                         mode='diffusion', 
                         shuffle=True, 
-                        context_tokenizer=None):
+                        context_tokenizer=None,
+                        processed_data_path="./tokenized_ds"):
     def tokenization(example):
         text = example["text"]
         return tokenizer(text, padding="max_length", truncation=True, max_length=max_seq_len)
     
     collate_fn = DataCollatorForLatentVAE(tokenizer)
-
-    dataset = dataset.map(tokenization, remove_columns='text')   
+    if os.path.exists(processed_data_path):
+        print(f"Loading tokenized dataset from disk: {processed_data_path}")
+        tokenized_dataset = load_from_disk(processed_data_path)
+    else:
+        print("Tokenizing dataset...")        
+        num_cores = max(os.cpu_count() // 4, 2) 
+        tokenized_dataset = dataset.map(
+            tokenization,
+            batched=True,
+            num_proc=num_cores,
+            remove_columns=['text', "id", "metadata"] 
+            
+        )
+        print(f"Saving tokenized dataset to disk: {processed_data_path}")
+        tokenized_dataset.save_to_disk(processed_data_path)
+    
     dl = DataLoader(
-            dataset,
+            tokenized_dataset,
             collate_fn = collate_fn,
             batch_size = args.train_bs,
             shuffle = shuffle,
             pin_memory = True,
-            num_workers = 4
+            num_workers = max(os.cpu_count() // 2, 4)
         )
     return dl
