@@ -12,8 +12,6 @@ from transformers.trainer_pt_utils import AcceleratorConfig
 from diffusion.neural_diffusion import DiTModel
 
 
-# --- Helper Functions ---
-
 def exists(x):
     """Checks if a value is not None."""
     return x is not None
