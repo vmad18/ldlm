@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", type=str, default="tiny_stories")
     parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--bb", type=str, default="bart")
+    parser.add_argument("--bb", type=str, default="t5")
     
     parser.add_argument("--train_bs", type=int, default=16) # 196
     parser.add_argument("--eval_bs", type=int, default=16)
