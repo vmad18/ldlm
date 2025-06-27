@@ -318,32 +318,30 @@ class Trainer(object):
                     self.lr_scheduler.step()
                     accelerator.wait_for_everyone()
 
+                    # --- Logging and Step Update ---
+                    # Log to WandB every 50 optimizer steps
                     if self.step % 50 == 0 and accelerator.is_main_process:
                         self.model.eval()
                         with torch.no_grad():
                             total_val_loss = 0.
+                            # Use a single validation batch for logging
                             val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
-                            losses = self.model(val_data["input_ids"], attn_mask=val_data["attention_mask"])
-                            val_loss = losses['reconstruction_loss'] + self.kld_weight * losses['kld_loss']
+                            losses = self.model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"])
+                            
+                            # Note: We don't normalize validation loss as it's for evaluation
+                            val_loss = losses['reconstruction_loss'] + self.kdl_weight * losses['kld_loss']
                             total_val_loss = val_loss.item()
+
                             logs = {"train/loss": total_loss, "val/loss": total_val_loss, "grad_norm": grad_norm,
                                     "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
                                     "epoch": (self.step * self.grad_accumulate) / len(self.dataloader),
                                     "samples": self.step * self.train_bs * self.num_dev * self.grad_accumulate
-                                   }
-                            pbar.set_postfix(**logs)
-                            accelerator.log(logs, step=self.step)
-                        self.model.train()
-                    else:
-                        logs = {"train/loss": total_loss, 
-                                "grad_norm": grad_norm, 
-                                "lr": self.lr_scheduler.get_last_lr()[0]
-                               }
-                        if accelerator.is_main_process:
-                             accelerator.log(logs, step=self.step)
+                                }
+                            if accelerator.is_main_process:
+                                accelerator.log(logs, step=self.step)
 
-                    self.step += 1
-                    pbar.update(1)
+                        self.step += 1
+                        pbar.update(1)
                     # prof.step()
 
         self.save()

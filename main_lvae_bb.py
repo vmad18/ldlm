@@ -8,15 +8,25 @@ import json
 
 import sys
 
-from autoencoder.train_ae import Trainer 
+from autoencoder.train_lvae_bb import Trainer 
 import argparse
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_name", type=str, default="roc")
-    parser.add_argument("--max_seq_len", type=int, default=64)
-    parser.add_argument("--train_bs", type=int, default=128) # 196
-    parser.add_argument("--eval_bs", type=int, default=32)
+    parser.add_argument("--dataset_name", type=str, default="tiny_stories")
+    parser.add_argument("--max_seq_len", type=int, default=1024)
+    parser.add_argument("--bb", type=str, default="t5")
+    
+    parser.add_argument("--train_bs", type=int, default=16) # 196
+    parser.add_argument("--eval_bs", type=int, default=16)
+    
+    parser.add_argument("--d_model", type=int, default=512)
+    parser.add_argument("--latent_dim", type=int, default=1024)
+    parser.add_argument("--num_latents", type=int, default=64)
+
+    parser.add_argument("--dim_head", type=int, default=128)
+    parser.add_argument("--num_layers", type=int, default=2)
+    
     # parser.add_argument("--num_encoder_latents", type=int, default=32)
     # parser.add_argument("--num_decoder_latents", type=int, default=32)
     # parser.add_argument("--dim_ae", type=int, default=256)

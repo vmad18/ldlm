@@ -257,6 +257,101 @@ class Trainer(object):
                 self.lr_scheduler.step()
 
 
+    # def validation(self):
+    #     self.model.eval()
+    #     pred_text = {k:[] for k,_ in generate_kwargs.items()}    
+    #     bart_text = {k:[] for k,_ in generate_kwargs.items()}    
+    #     ref_text = []
+    #     accelerator = self.accelerator
+    #     device = self.accelerator.device
+    #     for batch in tqdm(self.val_dataloader):
+    #         for strategy in generate_kwargs.keys():
+    #             gen_kwargs = generate_kwargs[strategy]
+    #             gen_kwargs['max_length'] = self.max_seq_len
+    #             data = {k:v.to(device) for k,v in batch.items()}
+    #             # Compute generated language
+
+    #             enc_outs, loss = self.model.bart_autoencode(input_ids = data["input_ids"], attn_mask = data["attention_mask"])
+
+    #             if self.num_dev > 1:
+    #                 sample_ids = self.model.module.generate(encoder_outputs=enc_outs, **gen_kwargs)
+    #             else:
+    #                 sample_ids = self.model.generate(encoder_outputs=enc_outs, **gen_kwargs)
+                
+    #             # Pad sample_ids to max_seq_len
+    #             sample_ids = F.pad(sample_ids, (0, self.max_seq_len - sample_ids.shape[-1]), value=self.tokenizer.pad_token_id)
+    #             gathered_sample_ids = accelerator.gather(sample_ids).to('cpu')
+    #             texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_sample_ids]
+    #             pred_text[strategy].extend(texts_list)
+
+    #             # Compute BART language
+    #             if self.num_dev > 1:
+    #                 sample_ids2 = self.model.module.generate(input_ids = data['input_ids'], attention_mask = data['attention_mask'], **gen_kwargs)
+    #             else:
+    #                 sample_ids2 = self.model.generate(input_ids = data['input_ids'], attention_mask = data['attention_mask'], **gen_kwargs)
+                
+    #             sample_ids2 = F.pad(sample_ids2, (0, self.max_seq_len - sample_ids2.shape[-1]), value=self.tokenizer.pad_token_id)
+    #             gathered_sample_ids2 = accelerator.gather(sample_ids2).to('cpu')
+    #             texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_sample_ids2]
+    #             bart_text[strategy].extend(texts_list)
+
+    #         # Store reference language
+    #         gathered_input_ids = accelerator.gather(data['input_ids']).to('cpu')
+    #         texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in gathered_input_ids]
+    #         ref_text.extend(texts_list)
+    #         if len(ref_text) > 1000:
+    #             break
+
+    #     if not self.accelerator.is_main_process:
+    #         return
+    #     # Compute metrics
+    #     metrics = {}
+    #     for strategy in generate_kwargs.keys():
+    #         # Compute BLEU score
+    #         metrics[f'autoencoder/{strategy}/bleu'] = evaluation.compute_bleu(pred_text[strategy], ref_text)
+    #         metrics[f'bart/{strategy}/bleu'] = evaluation.compute_bleu(bart_text[strategy], ref_text)
+    #         # Compute perplexity
+
+    #         if all(pred_text[strategy]):
+    #             metrics[f'autoencoder/{strategy}/perplexity'] = evaluation.compute_perplexity(pred_text[strategy])
+
+    #         if all(bart_text[strategy]):
+    #             metrics[f'bart/{strategy}/perplexity'] = evaluation.compute_perplexity(bart_text[strategy])
+
+    #         rouge_metrics = evaluation.compute_rouge(pred_text[strategy], ref_text)
+    #         for k,v in rouge_metrics.items():
+    #             metrics[f'autoencoder/{strategy}/{k}'] = v
+    #         rouge_metrics = evaluation.compute_rouge(bart_text[strategy], ref_text)
+    #         for k,v in rouge_metrics.items():
+    #             metrics[f'bart/{strategy}/{k}'] = v
+    #     metrics['reference/perplexity'] = evaluation.compute_perplexity(ref_text)
+        
+
+    #     accelerator.log(metrics, self.step)
+
+    #     # Log samples
+    #     # reference | strategy0/autoencoder | strategy0/bart | strategy1/autoencoder | strategy1/bart | ...
+    #     columns = ['reference'] + [f'{strategy}/autoencoder' for strategy in generate_kwargs.keys()] + [f'{strategy}/bart' for strategy in generate_kwargs.keys()]
+    #     data = []
+    #     for i in range(len(ref_text)):
+    #         row = [ref_text[i]]
+    #         for strategy in generate_kwargs.keys():
+    #             row.append(pred_text[strategy][i])
+            
+    #         for strategy in generate_kwargs.keys():
+    #             row.append(bart_text[strategy][i])
+    #         data.append(row)
+        
+    #     print(data)
+        
+    #     table = wandb.Table(columns=columns, data=data)
+    #     accelerator.log({f"Samples": table}, self.step)
+
+
+
+
+
+
     def validation(self):
         self.model.eval()
         pred_text = {k:[] for k,_ in generate_kwargs.items()}    
@@ -346,6 +441,9 @@ class Trainer(object):
         accelerator.log({f"Samples": table}, self.step)
 
 
+        
+
+    
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
@@ -368,6 +466,8 @@ class Trainer(object):
                     annealed_vae_loss = current_kld_weight * kld_loss # + self.vae_loss_weight * recon_loss
 
                     loss = annealed_vae_loss + model_loss
+
+
                 
                 total_loss += loss.item()
                 self.accelerator.backward(loss)
