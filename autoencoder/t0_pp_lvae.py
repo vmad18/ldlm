@@ -5,7 +5,8 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase, PretrainedConfig, T5Config
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, PretrainedConfig, T5Config, T5Tokenizer
+from transformers.modeling_outputs import BaseModelOutput
 
 from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
@@ -32,7 +33,7 @@ class LatentEncoderConfig(Config):
     qk_norm: bool = False
 
     layers_p = 2
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class LatentDecoderConfig(Config): 
@@ -52,7 +53,7 @@ class LatentDecoderConfig(Config):
     qk_norm: bool = False
 
     layers_p = 2
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class LatentVAEModel(T5ForConditionalGeneration): 
@@ -72,7 +73,7 @@ class LatentVAEModel(T5ForConditionalGeneration):
                  layers_p = 4,  
                  ctx = nullcontext(),
                  num_dev: int = 1,
-                 dev: str = "cuda",) -> None: 
+                 dev: str = "cuda" if torch.cuda.is_available() else "cpu",) -> None: 
         super().__init__(config)
 
         cfg_enc, cfg_dec = create_enc_dec_cfg(dim=d_model, 
@@ -133,20 +134,93 @@ class LatentVAEModel(T5ForConditionalGeneration):
 
         encodings = self.get_t5_encodings(input_ids, attn_mask)  
         
-        recon_encs, mu, log_var = self.vae(encodgins[0], attn_mask.bool())
+        projected_encodings = self.proj_down(encodings[0])
+        
+        recon_encs, mu, log_var = self.vae(projected_encodings, attn_mask.bool())
+        var_loss_dict = self.vae.cont_loss_func(recon_encs, projected_encodings, mu, log_var)
+        
         recon_encs = self.proj_up(recon_encs[..., :s, :]) 
         encodings["last_hidden_state"] = recon_encs 
-        return encodings, self.vae.cont_loss_func(recon_encs, encodings[0], mu, log_var)
+        
+        return encodings, var_loss_dict['total_loss']
 
-    
+    def encode(self, latents: torch.Tensor) -> Tuple[Any, dict]:
+        """
+        Takes pre-computed latents, runs them through the VAE, and returns the VAE's output and loss.
+        This is used when training only the VAE on pre-computed T5 latents.
+        """
+        projected_latents = self.proj_down(latents)
+        recon_latents, mu, log_var = self.vae(projected_latents)
+        var_loss_dict = self.vae.cont_loss_func(recon_latents, projected_latents, mu, log_var)
+        return recon_latents, var_loss_dict['kld_loss']
 
-    # def forward(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
-    #     return self.autoencode(input_ids, attn_mask)
-    
+    def decode_loss(self, original_latents: torch.Tensor, decoded_latents: Any) -> torch.Tensor:
+        """
+        Computes the reconstruction loss between original and decoded latents.
+        This is primarily for the pre-computed latent training path.
+        """
+        # The VAE output might be a tuple or object, ensure we get the tensor
+        if isinstance(decoded_latents, tuple):
+            recon_latents = decoded_latents[0]
+        else:
+            recon_latents = decoded_latents
+            
+        recon_latents = self.proj_up(recon_latents)
+
+        return F.mse_loss(recon_latents, original_latents)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        input_latents: Optional[torch.Tensor] = None,
+        # This argument is for compatibility with generate()
+        encoder_outputs: Optional[torch.Tensor] = None,
+    ) -> dict:
+
+        if encoder_outputs is not None:
+            # This path is used by .generate()
+            return super().forward(labels=labels, encoder_outputs=encoder_outputs)
+
+        if input_latents is not None:
+            # Pre-computed latent path
+            recon_latents, kld_loss = self.encode(input_latents)
+            recon_loss = self.decode_loss(input_latents, recon_latents)
+            # For generation, we need to wrap the reconstructed latents in a BaseModelOutput
+            projected_up_recon = self.proj_up(recon_latents)
+            enc_outs = BaseModelOutput(last_hidden_state=projected_up_recon)
+            return {
+                'reconstruction_loss': recon_loss,
+                'kld_loss': kld_loss,
+                'encoder_outputs': enc_outs
+            }
+
+        if input_ids is not None:
+            # On-the-fly tokenization path
+            enc_outs, vae_loss = self.autoencode(input_ids, attention_mask)
+            lm_loss = super().forward(labels=labels, encoder_outputs=enc_outs).loss
+
+            return {
+                'lm_loss': lm_loss,
+                'vae_loss': vae_loss,
+                'encoder_outputs': enc_outs
+            }
+
+        raise ValueError("Either `input_ids` or `input_latents` must be provided.")
+
 
 def get_latent_vae_tokenizer_t5(args, ctx, num_dev: int = 1, base_t5: str = "bigscience/T0pp") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase, PretrainedConfig]:
     config = T5ForConditionalGeneration.from_pretrained(base_t5).config 
-    tokenizer = AutoTokenizer.from_pretrained(base_t5)
+    tokenizer = T5Tokenizer.from_pretrained(base_t5)
+
+    print("\n" + "="*50)
+    print("Initializing LatentVAEModel with the following parameters:")
+    print(f"  d_model: {args.d_model}")
+    print(f"  latent_dim: {args.latent_dim}")
+    print(f"  num_latents: {args.num_latents}")
+    print(f"  max_seq_len (as max_tokens): {args.max_seq_len}")
+    print("="*50 + "\n")
 
     vae = LatentVAEModel.from_pretrained(
         base_t5,
@@ -168,7 +242,7 @@ def get_latent_vae_tokenizer_t5(args, ctx, num_dev: int = 1, base_t5: str = "big
         for (param_name, param) in vae.named_parameters():
             if re.fullmatch(".*vae.*", param_name):
                 param.requires_grad = True
-                print(f"Trainable: {param_name}")
+                # print(f"Trainable: {param_name}")
             else:
                 param.requires_grad = False
     

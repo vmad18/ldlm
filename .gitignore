@@ -2,3 +2,4 @@
 __pycache__/
 saved_latent_models/
 tokenized_ds/
+precomputed_latents/

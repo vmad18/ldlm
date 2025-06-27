@@ -30,7 +30,7 @@ class LatentEncoderConfig(Config):
     qk_norm: bool = False
 
     layers_p = 2
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class LatentDecoderConfig(Config): 
@@ -50,7 +50,7 @@ class LatentDecoderConfig(Config):
     qk_norm: bool = False
 
     layers_p = 2
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
 class LatentVAEModel(nn.Module): 
 
@@ -67,7 +67,7 @@ class LatentVAEModel(nn.Module):
                  qk_norm: bool = False, 
                  layers_p = 4,  
                  ctx = nullcontext(),
-                 dev: str = "cuda") -> None: 
+                 dev: str = "cuda" if torch.cuda.is_available() else "cpu") -> None: 
         super().__init__()
 
         cfg_enc, cfg_dec = create_enc_dec_cfg(dim=d_model, 

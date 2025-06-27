@@ -20,7 +20,7 @@ class Config:
             base: int = int(1e5),
             qk_norm: bool = False,
             layers_p = 8,
-            dev = "cuda",) -> None:
+            dev = "cuda" if torch.cuda.is_available() else "cpu",) -> None:
 
         self.dim: int = dim
         self.num_latents: int = num_latents
@@ -35,7 +35,7 @@ class Config:
         self.qk_norm: bool = qk_norm
 
         self.layers_p = layers_p
-        self.dev = "cuda"
+        self.dev = dev
 
 class EncConfig(Config):
 
@@ -53,7 +53,7 @@ class EncConfig(Config):
 
     layers_p = 8
 
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
 class DecConfig(Config):
 
@@ -71,7 +71,7 @@ class DecConfig(Config):
 
     layers_p = 8
 
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def create_enc_dec_cfg(
@@ -85,8 +85,10 @@ def create_enc_dec_cfg(
     base: int = int(1e5),
     qk_norm: bool = False,
     layers_p = 8,
-    dev = "cuda",
+    dev = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> Tuple[Config, Config]:
+    # Encoder config: Takes in a sequence of `max_tokens` vectors, each of dimension `dim`.
+    # Outputs `num_latents` vectors, each of dimension `latent_dim`.
     enc_cfg = Config(dim=dim,
                      latent_dim=latent_dim,
                      num_latents=num_latents,
@@ -94,10 +96,13 @@ def create_enc_dec_cfg(
                      expansion_factor=expansion_factor, use_rope=use_rope,
                      base=base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
 
-    dec_cfg = Config(dim=latent_dim,
-                     latent_dim=dim,
-                     num_latents=max_tokens,
-                     dim_head=dim_head, max_tokens=num_latents,
+    # Decoder config: Takes in `num_latents` vectors (from encoder), each of dimension `latent_dim`.
+    # Outputs `max_tokens` vectors (reconstructed), each of dimension `dim`.
+    dec_cfg = Config(dim=latent_dim,           # Decoder input dim is encoder's output dim
+                     latent_dim=dim,           # Decoder output dim is encoder's input dim
+                     num_latents=max_tokens,   # Decoder output length is encoder's input length
+                     dim_head=dim_head, 
+                     max_tokens=num_latents,   # Decoder input length is encoder's output length
                      expansion_factor=expansion_factor, use_rope=use_rope,
                      base=base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
     return enc_cfg, dec_cfg
@@ -105,7 +110,7 @@ def create_enc_dec_cfg(
 
 class RoPE(nn.Module):
 
-    def __init__(self, cfg: Config, dim: int, scaling: float = 1., device ="cuda") -> None:
+    def __init__(self, cfg: Config, dim: int, scaling: float = 1., device: str = "cuda" if torch.cuda.is_available() else "cpu") -> None:
         super().__init__()
 
         self.dim = dim 
@@ -152,11 +157,11 @@ class RoPE(nn.Module):
 
 class AbsolutePositionalEmbedding(nn.Module): 
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, dim: int):
         super().__init__() 
 
-        self.scale = 1. / sqrt(cfg.dim)
-        self.embed = nn.Embedding(cfg.max_tokens, cfg.dim, device=cfg.dev)
+        self.scale = 1. / sqrt(dim)
+        self.embed = nn.Embedding(cfg.max_tokens, dim, device=cfg.dev)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor: 
         s = x.shape[-2] 
@@ -253,7 +258,7 @@ class PerceiverResampler(nn.Module):
     def __init__(self, cfg: Config) -> None:
         super().__init__()
 
-        self.pos_embed = AbsolutePositionalEmbedding(cfg)
+        self.pos_embed = AbsolutePositionalEmbedding(cfg, cfg.dim)
 
         self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim), device=cfg.dev))
         nn.init.normal_(self.latents, std = 0.02) 
@@ -315,6 +320,10 @@ class VariationalAutoEncoder(nn.Module):
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
 
     def cont_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+        if recon_x.shape != x.shape:
+            print(f"[VAE ERROR] Shape mismatch in loss calculation:")
+            print(f"  --> recon_x shape: {recon_x.shape}")
+            print(f"  --> x shape:       {x.shape}")
         recon_loss = F.mse_loss(recon_x, x, reduction='sum')
         kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
         total_loss = recon_loss + kld_loss
@@ -331,7 +340,7 @@ class VariationalAutoEncoder(nn.Module):
 if __name__ == "__main__":
     e_cfg = EncConfig()
     d_cfg = DecConfig()
-    attn = AutoEncoder(e_cfg, d_cfg)
+    attn = VariationalAutoEncoder(e_cfg, d_cfg)
     # latents = torch.randn((3, 16, 1024)).cuda()
     x = torch.randn((3, 300, 512)).cuda()
 

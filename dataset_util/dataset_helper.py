@@ -1,22 +1,58 @@
 from multiprocessing.spawn import prepare
 import os
 import json
+from typing import Optional
 
 from datasets import load_dataset, Value 
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerBase, default_data_collator
 from datasets import DatasetDict, Dataset
+import numpy as np
+import torch
 
 from datasets import load_from_disk
 
 from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE, DataCollatorForLatentVAET5
 
 
+class PrecomputedLatentDataset(Dataset):
+    """
+    A dataset that loads pre-computed latent tensors from a single memory-mapped .npy file.
+    """
+    def __init__(self, latent_dir: str):
+        self.latent_dir = latent_dir
+        
+        # Load metadata
+        metadata_path = os.path.join(self.latent_dir, "metadata.json")
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"metadata.json not found in {self.latent_dir}")
+        with open(metadata_path, 'r') as f:
+            self.metadata = json.load(f)
+        
+        self.num_samples = self.metadata['num_samples']
+        
+        # Memory-map the latents file
+        latents_path = os.path.join(self.latent_dir, "latents.npy")
+        if not os.path.exists(latents_path):
+            raise FileNotFoundError(f"latents.npy not found in {self.latent_dir}")
+            
+        self.latents = np.load(latents_path, mmap_mode='r')
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        # The latents are already pre-computed and stored.
+        # We just need to fetch the correct one.
+        latent = self.latents[idx]
+        return {"input_latents": torch.from_numpy(latent)}
+
+
 def exists(x):
     return x is not None
 
 
-def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
+def get_dataset(dataset_name, metadata=False, synthetic_train_path=None, shard_size=None):
     if dataset_name == 'roc':
         roc_data_path = 'datasets/ROCstory'
         dataset = load_dataset("text", data_files={f'{split}': os.path.join(roc_data_path, f'roc_{split}.json') for split in ['train', 'valid']})
@@ -58,7 +94,7 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'en-en')
     elif dataset_name == "fineweb-edu_10b":
-        dataset = process_fineweb_edu()
+        dataset = process_fineweb_edu(shard_size=shard_size)
     elif dataset_name == "tiny_stories":
         dataset = process_tiny_stories()
     else:
@@ -69,7 +105,8 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
 def process_fineweb_edu(
     split_ratio = 0.1,
     output_dir="/scratch/gpfs/ashwinee/datasets/fineweb_edu_splits/", # Directory to save/load splits
-    force_resplit=False # Option to force re-splitting even if files exist
+    force_resplit=False, # Option to force re-splitting even if files exist
+    shard_size: Optional[int] = None # Number of samples to use for a small shard
 ):
     os.makedirs(output_dir, exist_ok=True)
     split_dataset_path = os.path.join(output_dir, f"fineweb_edu_split_valid{int(split_ratio*100)}")
@@ -77,7 +114,6 @@ def process_fineweb_edu(
     if os.path.exists(split_dataset_path) and not force_resplit:
         print(f"Loading pre-split dataset from {split_dataset_path}")
         loaded_ds_dict = DatasetDict.load_from_disk(split_dataset_path)
-        return loaded_ds_dict
     else:
         dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b")
         print(f"Splitting dataset: fineweb-edu_10b. This may take some time for large datasets.")
@@ -95,7 +131,16 @@ def process_fineweb_edu(
         print(f"Dataset split complete. Saving to {split_dataset_path}...")
         final_ds_dict.save_to_disk(split_dataset_path, num_proc=32)
         print("Split dataset saved to disk.")
-        return final_ds_dict
+        loaded_ds_dict = final_ds_dict
+
+    if shard_size is not None:
+        print(f"Creating a small shard of size {shard_size} for testing.")
+        loaded_ds_dict['train'] = loaded_ds_dict['train'].select(range(shard_size))
+        # Also shard the validation set proportionally
+        val_shard_size = max(1, int(shard_size * split_ratio))
+        loaded_ds_dict['valid'] = loaded_ds_dict['valid'].select(range(val_shard_size))
+
+    return loaded_ds_dict
 
 def process_tiny_stories(
     split_ratio = 0.1,
@@ -250,6 +295,11 @@ def get_dataloader_lvae(args,
         return tokenizer(text, padding="max_length", truncation=True, max_length=max_seq_len)
     
     collate_fn = DataCollatorForLatentVAE(tokenizer)
+
+    # Create a unique path for the tokenized dataset to avoid vocab mismatch.
+    sanitized_tokenizer_name = tokenizer.name_or_path.replace("/", "__")
+    processed_data_path = f"tokenized_ds/{args.dataset_name}/{sanitized_tokenizer_name}_seqlen{max_seq_len}"
+
     if os.path.exists(processed_data_path):
         print(f"Loading tokenized dataset from disk: {processed_data_path}")
         tokenized_dataset = load_from_disk(processed_data_path)
@@ -286,12 +336,41 @@ def get_dataloader_lvae_t5(
                         mode='diffusion', 
                         shuffle=True, 
                         context_tokenizer=None,
-                        processed_data_path="./tokenized_ds"):
+                        use_precomputed_latents=False,
+                        precomputed_latent_path=None,
+                        batch_size=128):
+
+    if use_precomputed_latents:
+        if precomputed_latent_path is None:
+            raise ValueError("precomputed_latent_path must be provided when use_precomputed_latents is True")
+        
+        dataset = PrecomputedLatentDataset(latent_dir=precomputed_latent_path)
+
+        dataloader = DataLoader(
+            dataset,
+            shuffle=shuffle,
+            collate_fn=default_data_collator, # Use default collator as we are returning dicts
+            batch_size=batch_size,
+            # num_workers=args.num_workers,
+            num_workers=os.cpu_count() // 2,
+            pin_memory=True,
+        )
+        return dataloader
+
+    # --- This part below is for on-the-fly tokenization if not using precomputed latents ---
+
+    # Adjust the cache path to be unique for the tokenizer model
+    tokenizer_name = tokenizer.name_or_path.replace("/", "__")
+
     def tokenization(example):
         text = example["text"]
         return tokenizer(text, padding="max_length", truncation=True, max_length=max_seq_len)
     
     collate_fn = DataCollatorForLatentVAET5(tokenizer, model_config.decoder_start_token_id)
+    
+    # Create a unique path for the tokenized dataset to avoid vocab mismatch.
+    processed_data_path = f"tokenized_ds/{args.dataset_name}/{tokenizer_name}_seqlen{max_seq_len}"
+
     if os.path.exists(processed_data_path):
         print(f"Loading tokenized dataset from disk: {processed_data_path}")
         tokenized_dataset = load_from_disk(processed_data_path)
@@ -302,7 +381,7 @@ def get_dataloader_lvae_t5(
             tokenization,
             batched=True,
             num_proc=num_cores,
-            remove_columns=['text'] 
+            remove_columns=['text', 'id', 'metadata'] 
             
         )
         print(f"Saving tokenized dataset to disk: {processed_data_path}")
