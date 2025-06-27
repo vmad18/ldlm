@@ -58,16 +58,27 @@ class LatentAEModel(BartForConditionalGeneration):
 
     def __init__(self, 
                  config: BartConfig,
+                 d_model: int = 768, 
+                 latent_dim: int = 1024, 
+                 num_latents: int = 32,
+                 dim_head: int = 128, 
+                 max_tokens = 2048, 
+                 expansion_factor: int = 4, 
+                 use_rope: bool = True, 
+                 rope_base: int = int(1e5), 
+                 qk_norm: bool = False, 
+                 layers_p = 4,  
                  ctx = nullcontext(),
                  dev: str = "cuda",
                  num_dev: int = 1) -> None: 
         super().__init__(config)
 
         cfg_enc, cfg_dec = create_enc_dec_cfg(config.d_model, 
-                                              1024, 
-                                              64, 
-                                              128,
-                                              1024, 4, True, int(1e5), False, 3, dev)
+                                              latent_dim, 
+                                              num_latents, 
+                                              dim_head,
+                                              max_tokens, 
+                                              expansion_factor, use_rope, rope_base, qk_norm, layers_p, dev)
 
         self.ae = VariationalAutoEncoder(cfg_enc, cfg_dec)
 
@@ -108,7 +119,16 @@ class LatentAEModel(BartForConditionalGeneration):
 
 def get_latent_ae_tokenizer(args, ctx, num_dev: int = 1) -> Tuple[LatentAEModel, PreTrainedTokenizerBase, PretrainedConfig]:
     config = BartForConditionalGeneration.from_pretrained("facebook/bart-base").config
-    ae = LatentAEModel.from_pretrained("facebook/bart-base", config=config, ctx=ctx, num_dev = num_dev, _fast_init=False) 
+    ae = LatentAEModel.from_pretrained(
+                                        "facebook/bart-base", 
+                                        config=config, ctx=ctx, 
+                                        d_model = args.d_model, 
+                                        latent_dim = args.latent_dim, 
+                                        num_latents = args.num_latents, 
+                                        dim_head = args.dim_head, 
+                                        max_tokens = args.max_seq_len, 
+                                        layers_p = args.num_layers, 
+                                        num_dev = num_dev, _fast_init=False) 
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained("facebook/bart-base") 
 
     if args.freeze_bb == 'ft':
