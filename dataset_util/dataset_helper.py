@@ -9,7 +9,7 @@ from datasets import DatasetDict, Dataset
 
 from datasets import load_from_disk
 
-from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE
+from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE, DataCollatorForLatentVAET5
 
 
 def exists(x):
@@ -59,6 +59,8 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
         dataset = process_wmt14_dataset(dataset, 'en-en')
     elif dataset_name == "fineweb-edu_10b":
         dataset = process_fineweb_edu()
+    elif dataset_name == "tiny_stories":
+        dataset = process_tiny_stories()
     else:
         raise NotImplementedError
     return dataset
@@ -94,7 +96,39 @@ def process_fineweb_edu(
         final_ds_dict.save_to_disk(split_dataset_path, num_proc=32)
         print("Split dataset saved to disk.")
         return final_ds_dict
-    
+
+def process_tiny_stories(
+    split_ratio = 0.1,
+    output_dir="./tiny_stories_splits/", # Directory to save/load splits
+    force_resplit=False # Option to force re-splitting even if files exist
+):
+    os.makedirs(output_dir, exist_ok=True)
+    split_dataset_path = os.path.join(output_dir, f"tiny_stories_split_valid{int(split_ratio*100)}")
+
+    if os.path.exists(split_dataset_path) and not force_resplit:
+        print(f"Loading pre-split dataset from {split_dataset_path}")
+        loaded_ds_dict = DatasetDict.load_from_disk(split_dataset_path)
+        return loaded_ds_dict
+    else:
+        dataset = load_dataset("roneneldan/TinyStories")
+        print(f"Splitting dataset: TinyStories. This may take some time for large datasets.")
+        dataset = dataset['train']
+        split_datasets = dataset.train_test_split(
+            test_size = split_ratio,
+            seed = 42
+        )
+
+        final_ds_dict = DatasetDict({
+            'train': split_datasets['train'],
+            'valid': split_datasets['test']
+        })
+        
+        print(f"Dataset split complete. Saving to {split_dataset_path}...")
+        final_ds_dict.save_to_disk(split_dataset_path)
+        print("Split dataset saved to disk.")
+        return final_ds_dict
+
+
 def process_roc_dataset(dataset):
     def extract_roc_text(example):
         text = example['text']
@@ -227,6 +261,48 @@ def get_dataloader_lvae(args,
             batched=True,
             num_proc=num_cores,
             remove_columns=['text', "id", "metadata"] 
+            
+        )
+        print(f"Saving tokenized dataset to disk: {processed_data_path}")
+        tokenized_dataset.save_to_disk(processed_data_path)
+    
+    dl = DataLoader(
+            tokenized_dataset,
+            collate_fn = collate_fn,
+            batch_size = args.train_bs,
+            shuffle = shuffle,
+            pin_memory = True,
+            num_workers = max(os.cpu_count() // 2, 4)
+        )
+    return dl
+
+
+def get_dataloader_lvae_t5(
+                        args,
+                        dataset,
+                        model_config, 
+                        tokenizer, 
+                        max_seq_len, 
+                        mode='diffusion', 
+                        shuffle=True, 
+                        context_tokenizer=None,
+                        processed_data_path="./tokenized_ds"):
+    def tokenization(example):
+        text = example["text"]
+        return tokenizer(text, padding="max_length", truncation=True, max_length=max_seq_len)
+    
+    collate_fn = DataCollatorForLatentVAET5(tokenizer, model_config.decoder_start_token_id)
+    if os.path.exists(processed_data_path):
+        print(f"Loading tokenized dataset from disk: {processed_data_path}")
+        tokenized_dataset = load_from_disk(processed_data_path)
+    else:
+        print("Tokenizing dataset...")        
+        num_cores = max(os.cpu_count() // 4, 2) 
+        tokenized_dataset = dataset.map(
+            tokenization,
+            batched=True,
+            num_proc=num_cores,
+            remove_columns=['text'] 
             
         )
         print(f"Saving tokenized dataset to disk: {processed_data_path}")
