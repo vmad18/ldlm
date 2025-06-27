@@ -28,9 +28,9 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default="saved_latent_models")
     parser.add_argument("--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--num_train_steps", type=int, default=50000)
+    parser.add_argument("--num_train_steps", type=int, default=10000)
     parser.add_argument("--lr_schedule", type=str, default="linear")
-    parser.add_argument("--lr_warmup_steps", type=int, default=2000)
+    parser.add_argument("--lr_warmup_steps", type=int, default=500)
 
     parser.add_argument("--eval_every", type=int, default=1000)
 
@@ -62,6 +62,7 @@ def main():
                       lr_schedule = args.lr_schedule, 
                       num_warmup_steps = args.lr_warmup_steps, 
                       eval_every = args.eval_every, 
+                      mixed_precision = args.mixed_precision,
                       )
 
     trainer.train() 

@@ -35,7 +35,7 @@ class Config:
         self.qk_norm: bool = qk_norm
 
         self.layers_p = layers_p
-        self.dev = dev
+        self.dev = "cuda"
 
 class EncConfig(Config):
 

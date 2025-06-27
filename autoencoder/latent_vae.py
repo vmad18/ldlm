@@ -52,7 +52,6 @@ class LatentDecoderConfig(Config):
     layers_p = 2
     dev = "cuda"
 
-
 class LatentVAEModel(nn.Module): 
 
     def __init__(self, 
@@ -68,7 +67,7 @@ class LatentVAEModel(nn.Module):
                  qk_norm: bool = False, 
                  layers_p = 4,  
                  ctx = nullcontext(),
-                 dev: str = "cuda",) -> None: 
+                 dev: str = "cuda") -> None: 
         super().__init__()
 
         cfg_enc, cfg_dec = create_enc_dec_cfg(dim=d_model, 
@@ -115,7 +114,18 @@ class LatentVAEModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
         return self.autoencode(input_ids, attn_mask)
-    
+
+    def compile_transformer_blocks(self, compile_kwargs: dict):
+        """
+        Compiles the transformer blocks within the VAE's encoder and decoder.
+        This is a form of partial compilation to accelerate the most intensive parts of the model.
+        """
+        for block in self.vae.encoder.layers:
+            block.compile(**compile_kwargs)
+        
+        for block in self.vae.decoder.layers:
+            block.compile(**compile_kwargs)
+
 
 def get_latent_vae_tokenizer(args, tokenizer_name: str = "meta-llama/Llama-3.2-1B") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)

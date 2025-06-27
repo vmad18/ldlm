@@ -66,7 +66,7 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None):
 
 def process_fineweb_edu(
     split_ratio = 0.1,
-    output_dir="./fineweb_edu_splits/", # Directory to save/load splits
+    output_dir="/scratch/gpfs/ashwinee/datasets/fineweb_edu_splits/", # Directory to save/load splits
     force_resplit=False # Option to force re-splitting even if files exist
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -91,7 +91,7 @@ def process_fineweb_edu(
         })
         
         print(f"Dataset split complete. Saving to {split_dataset_path}...")
-        final_ds_dict.save_to_disk(split_dataset_path)
+        final_ds_dict.save_to_disk(split_dataset_path, num_proc=32)
         print("Split dataset saved to disk.")
         return final_ds_dict
     

@@ -37,6 +37,9 @@ from datetime import datetime
 
 import evaluation
 
+import torch.profiler
+from torch.profiler import profile, ProfilerActivity
+
 
 generate_kwargs = {
     'beam': 
@@ -129,7 +132,7 @@ class Trainer(object):
                  num_samples=None,
                  eval_every=1000,
                  results_folder="./results",
-                 mixed_percision="no",
+                 mixed_precision="bf16",
                  grad_accumulate: int = 16,
                  seed=412,
                  ) -> None:
@@ -144,7 +147,7 @@ class Trainer(object):
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
-            # mixed_percision = mixed_percision, 
+            mixed_precision = mixed_precision, 
             log_with="wandb",
             kwargs_handlers=[ddp_kwargs]
         )
@@ -166,8 +169,8 @@ class Trainer(object):
 
 
         self.model, self.tokenizer = get_latent_vae_tokenizer(args)
+        self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
         self.model: LatentVAEModel = self.model
-        self.model.compile()
         
         num_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         if self.accelerator.is_main_process:
@@ -217,7 +220,7 @@ class Trainer(object):
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
 
-        self.kdl_weight = 1e-7
+        self.kld_weight = 1e-6
 
     def save(self):
         if not self.accelerator.is_main_process:
@@ -254,77 +257,94 @@ class Trainer(object):
         accelerator = self.accelerator
         device = accelerator.device
         self.model.train()
+
+        # --- Comprehensive Warm-up Pass ---
+        if accelerator.is_main_process:
+            accelerator.print("Starting comprehensive warm-up pass to compile forward and backward graphs...")
+
+        # Get one batch for warm-up
+        warmup_data = {k: v.to(device) for k, v in next(self.data_iter).items()}
         
-        with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
-            while self.step < self.train_num_steps:
-                
-                # Zero the gradients once before starting accumulation
-                self.opt.zero_grad()
+        # Full forward, backward, and optimizer step to trigger compilation
+        with accelerator.autocast():
+            losses = self.model(warmup_data["input_ids"], attn_mask=warmup_data["attention_mask"])
+            # Use the same loss calculation as in the main loop
+            loss = (losses['reconstruction_loss'] + self.kld_weight * losses['kld_loss']) / self.grad_accumulate
 
-                total_loss = 0.
+        self.accelerator.backward(loss)
+        self.opt.step()
+        self.opt.zero_grad() # Reset gradients immediately after warm-up
+        
+        accelerator.wait_for_everyone() # Ensure all processes are synchronized
+        
+        if accelerator.is_main_process:
+            accelerator.print("Warm-up pass complete.")
+        # --- End Warm-up Pass ---
 
-                # Gradient accumulation loop
-                for _ in range(self.grad_accumulate):
-                    data = {k: v.to(device) for k, v in next(self.data_iter).items()}
-                    with accelerator.autocast():
-                        losses = self.model.autoencode(data["input_ids"], attn_mask=data["attention_mask"])
+        trace_handler = None
+        if accelerator.is_main_process:
+            profile_dir = str(self.results_folder / "torch_profile")
+            trace_handler = torch.profiler.tensorboard_trace_handler(profile_dir)
 
-                        recon_loss = losses['reconstruction_loss']
-                        kld_loss = self.kdl_weight * losses['kld_loss']
+        # with profile(
+        #     activities=[ProfilerActivity.CUDA],
+        #     schedule=torch.profiler.schedule(wait=1, warmup=1, active=1, repeat=3),
+        #     on_trace_ready=trace_handler,
+        #     record_shapes=True,
+        #     with_stack=True,
+        #     experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)
+        # ) as prof:
+        if True:
+            with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
+                while self.step < self.train_num_steps:
+                    self.opt.zero_grad()
+                    total_loss = 0.
+                    for _ in range(self.grad_accumulate):
                         
-                        # Normalize loss to account for accumulation
-                        loss = (recon_loss + kld_loss) / self.grad_accumulate
+                        data = {k: v.to(device) for k, v in next(self.data_iter).items()}
+                        with accelerator.autocast():
+                            torch.compiler.cudagraph_mark_step_begin()
+                            losses = self.model(data["input_ids"], attn_mask=data["attention_mask"])
+                            recon_loss = losses['reconstruction_loss']
+                            kld_loss = self.kld_weight * losses['kld_loss']
+                            loss = (recon_loss + kld_loss) / self.grad_accumulate
+                        total_loss += loss.item()
+                        self.accelerator.backward(loss)
                     
-                    total_loss += loss.item()
-                    self.accelerator.backward(loss)
-    
-                accelerator.wait_for_everyone()
-                
-                # Gradient clipping and optimizer step are now performed once per accumulation cycle
-                grad_norm = compute_grad_norm(self.model.parameters())
-                accelerator.clip_grad_norm_(self.model.parameters(), 5.0)
-                
-                self.opt.step()
-                self.lr_scheduler.step()
+                    accelerator.wait_for_everyone()
+                    grad_norm = compute_grad_norm(self.model.parameters())
+                    accelerator.clip_grad_norm_(self.model.parameters(), 5.0)
+                    self.opt.step()
+                    self.lr_scheduler.step()
+                    accelerator.wait_for_everyone()
 
-                accelerator.wait_for_everyone()
-
-                # --- Logging and Step Update ---
-                
-                # Log to WandB every 50 optimizer steps
-                if self.step % 50 == 0 and accelerator.is_main_process:
-                    self.model.eval()
-                    with torch.no_grad():
-                        total_val_loss = 0.
-                        # Use a single validation batch for logging
-                        val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
-                        losses = self.model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"])
-                        
-                        # Note: We don't normalize validation loss as it's for evaluation
-                        val_loss = losses['reconstruction_loss'] + self.kdl_weight * losses['kld_loss']
-                        total_val_loss = val_loss.item()
-
-                        logs = {"train/loss": total_loss, "val/loss": total_val_loss, "grad_norm": grad_norm,
-                                "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
-                                "epoch": (self.step * self.grad_accumulate) / len(self.dataloader),
-                                "samples": self.step * self.train_bs * self.num_dev * self.grad_accumulate
+                    if self.step % 50 == 0 and accelerator.is_main_process:
+                        self.model.eval()
+                        with torch.no_grad():
+                            total_val_loss = 0.
+                            val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
+                            losses = self.model(val_data["input_ids"], attn_mask=val_data["attention_mask"])
+                            val_loss = losses['reconstruction_loss'] + self.kld_weight * losses['kld_loss']
+                            total_val_loss = val_loss.item()
+                            logs = {"train/loss": total_loss, "val/loss": total_val_loss, "grad_norm": grad_norm,
+                                    "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
+                                    "epoch": (self.step * self.grad_accumulate) / len(self.dataloader),
+                                    "samples": self.step * self.train_bs * self.num_dev * self.grad_accumulate
+                                   }
+                            pbar.set_postfix(**logs)
+                            accelerator.log(logs, step=self.step)
+                        self.model.train()
+                    else:
+                        logs = {"train/loss": total_loss, 
+                                "grad_norm": grad_norm, 
+                                "lr": self.lr_scheduler.get_last_lr()[0]
                                }
-                        pbar.set_postfix(**logs)
-                        accelerator.log(logs, step=self.step)
-                    self.model.train()
-                else:
-                    # Log training loss for other steps
-                    logs = {"train/loss": total_loss, 
-                            "grad_norm": grad_norm, 
-                            "lr": self.lr_scheduler.get_last_lr()[0]
-                           }
-                    if accelerator.is_main_process:
-                         accelerator.log(logs, step=self.step)
+                        if accelerator.is_main_process:
+                             accelerator.log(logs, step=self.step)
 
+                    self.step += 1
+                    pbar.update(1)
+                    # prof.step()
 
-                self.step += 1
-                pbar.update(1)
-
-        # self.validation() # Consider running a full validation loop here
         self.save()
         accelerator.print('training complete')
