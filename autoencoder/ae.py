@@ -292,10 +292,11 @@ class PerceiverResampler(nn.Module):
 class VariationalAutoEncoder(nn.Module):
     def __init__(self, cfg_enc: Config, cfg_dec: Config) -> None:
         super().__init__()
-
+        print("Making encoder...")
         self.encoder = PerceiverResampler(cfg_enc)
+        print("Encoder made.")
         self.decoder = PerceiverResampler(cfg_dec)
-        
+        print("Decoder made.")
         self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
 
     def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:

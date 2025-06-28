@@ -19,10 +19,9 @@ from transformers import get_scheduler, AutoTokenizer, PreTrainedTokenizerBase, 
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
-from .cond_flow_matcher import ConditionalFlowMatcher
-from ..autoencoder.bart_latent_model import get_latent_ae_tokenizer
-
-from diffusion.neural_diffusion import DiTModel, DiTConfig
+from ldlm.diffusion.cond_flow_matcher import ConditionalFlowMatcher
+from ldlm.autoencoder.t0_pp_lvae import get_latent_vae_tokenizer_t5
+from ldlm.diffusion.neural_diffusion import DiTModel, DiTConfig
 
 from accelerate import Accelerator, DistributedDataParallelKwargs, InitProcessGroupKwargs
 import wandb
@@ -38,7 +37,7 @@ from datetime import datetime
 import json
 import random
 
-from dataset_util.dataset_helper import get_dataset, get_dataloader
+from ldlm.dataset_util.dataset_helper import get_dataset, get_dataloader_lvae_t5
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -175,6 +174,14 @@ class Trainer(object):
             kwargs_handlers=[ddp_kwargs, init_process_kwargs],
         )
 
+        # Determine the target dtype based on the mixed precision setting
+        if self.accelerator.mixed_precision == "fp16":
+            self.model_dtype = torch.float16
+        elif self.accelerator.mixed_precision == "bf16":
+            self.model_dtype = torch.bfloat16
+        else:
+            self.model_dtype = torch.float32
+
         self.output_dir = output_dir
         self.num_dev = self.accelerator.num_processes
         args.num_devices = self.num_dev
@@ -184,23 +191,45 @@ class Trainer(object):
         self.eval_bs = args.eval_bs
         self.gradient_accumulate_every = gradient_accumulate_every
         self.ema_update_every = args.ema_update_every
+        self.eval_every = args.eval_every
 
-        # self.bart_model = BartForConditionalGeneration.from_pretrained("facebook/bart-base")
-        self.tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base")
+        # Load the arguments from the trained VAE model.
+        # This ensures we build the VAE with the same architecture it was trained with.
+        vae_args_path = os.path.join(args.latent_model_path, 'args.json')
+        if not os.path.exists(vae_args_path):
+            raise FileNotFoundError(f"VAE args.json not found at {vae_args_path}. Please ensure the latent_model_path is correct.")
+        with open(vae_args_path, 'r') as f:
+            vae_args = json.load(f)
+        vae_args = Namespace(**vae_args)
 
-        self.context_tokenizer = self.tokenizer
-        self.ae, self.tokenizer, _ = get_latent_ae_tokenizer(args, torch.no_grad(), self.num_dev)
-        self.ae = self.ae.cuda()
+        # When using the VAE to generate latents on the fly for diffusion training,
+        # we must set this to False.
+        vae_args.use_precomputed_latents = False
+
+        # We also need to copy some arguments from the diffusion script args
+        # to the VAE args, like the backbone freezing strategy.
+        vae_args.freeze_bb = args.freeze_bb
+
+        # Instantiate the T5-based VAE and its tokenizer
+        self.ae, self.tokenizer, _ = get_latent_vae_tokenizer_t5(vae_args, torch.no_grad(), self.num_dev)
+
+        # Load the trained VAE weights
         device = self.accelerator.device
+        self.ae.to(device)
         data = torch.load(os.path.join(args.latent_model_path, 'model.pt'), map_location=device)
-        self.ae.load_state_dict(data['model'])
-
+        
+        # We use `strict=False` because the saved VAE model was trained without the T5 encoder
+        # to save memory. The `get_latent_vae_tokenizer_t5` function has already loaded a
+        # pre-trained T5 encoder for us. This command loads the trained VAE and decoder weights
+        # from our saved file, while leaving the T5 encoder weights untouched.
+        self.ae.load_state_dict(data['model'], strict=False)
+        
         self.num_latents = self.ae.num_latents
+        self.latent_dim = self.ae.latent_dim
         self.num_samples = args.num_samples 
         
         for param in self.ae.parameters():
             param.requires_grad = False
-
 
         self.ae.eval()
 
@@ -222,16 +251,17 @@ class Trainer(object):
         cfg_dit = DiTConfig()
         cfg_dit.dim = args.model_dim
         cfg_dit.num_latents = self.ae.num_latents
-        cfg_dit.latent_dim = self.ae.latent_dim
+        print(f"Setting cfg_dit.latent_dim: {self.latent_dim}")
+        cfg_dit.latent_dim = self.latent_dim
         cfg_dit.num_layers = args.num_layers
         cfg_dit.dev = self.accelerator.device
 
         self.v_predictor = DiTModel(cfg_dit)
-        self.v_predictor.compile()
+        # self.v_predictor.compile()
 
         self.ema_decay = ema_decay
         self.ema_model = copy.deepcopy(self.v_predictor)
-        self.ema_model.compile()
+        # self.ema_model.compile()
 
         self.opt = get_adamw_optimizer(self.v_predictor.parameters(), lr=init_lr, betas=adam_betas,
                                        weight_decay=adam_weight_decay)  # try to use muon?
@@ -244,38 +274,35 @@ class Trainer(object):
         )
 
         self.dataset_name = args.dataset_name
-        dataset = get_dataset(args.dataset_name, )
+        dataset = get_dataset(args.dataset_name, shard_size=args.shard_size)
         self.dataset = dataset.shuffle(seed=412)
 
-        if args.eval_test:
-            self.num_samples = min(self.num_samples, len(self.dataset['test']))
-            print(f'Using {self.num_samples} samples for evaluation')
-        else:
-            self.num_samples = min(self.num_samples, len(self.dataset['valid']))
-            print(f'Using {self.num_samples} samples for evaluation')
+        # The fineweb-edu dataset only has 'train' and 'valid' splits, so we remove 'test' logic.
+        self.num_samples = min(self.num_samples, len(self.dataset['valid']))
+        print(f'Using {self.num_samples} samples for evaluation')
 
         self.train_num_steps = args.train_num_steps
 
-        self.train_val_dataloader = get_dataloader(args, dataset['train'].select(range(1000)),
-                                                   self.ae.config, self.tokenizer,
-                                                   self.ae.max_tokens, shuffle=False,
-                                                   context_tokenizer=self.context_tokenizer)
-        if args.resume_training:
-            dataset['train'] = dataset['train'].shuffle()
-        self.dataloader = get_dataloader(args, self.dataset['train'], self.ae.config,
-                                         self.tokenizer, self.ae.max_tokens,
-                                         context_tokenizer=self.context_tokenizer)
-        self.val_dataloader = get_dataloader(args, self.dataset['valid'], self.ae.config,
-                                             self.tokenizer, self.ae.max_tokens, shuffle=False,
-                                             context_tokenizer=self.context_tokenizer)
-        self.test_dataloader = get_dataloader(args, self.dataset['test'], self.ae.config,
-                                              self.tokenizer, self.ae.max_tokens, shuffle=False,
-                                              context_tokenizer=self.context_tokenizer)
+        # Use the more capable LVAE T5 dataloader
+        self.dataloader = get_dataloader_lvae_t5(
+            args, self.dataset['train'], self.ae.config, self.tokenizer,
+            vae_args.max_seq_len,
+            use_precomputed_latents=args.use_precomputed_latents,
+            precomputed_latent_path=args.precomputed_latent_path,
+            batch_size=self.train_bs
+        )
+        self.val_dataloader = get_dataloader_lvae_t5(
+            args, self.dataset['valid'], self.ae.config, self.tokenizer,
+            vae_args.max_seq_len, shuffle=False,
+            use_precomputed_latents=args.use_precomputed_latents,
+            precomputed_latent_path=args.precomputed_latent_path,
+            batch_size=self.eval_bs
+        )
 
         self.step = 0
 
-        self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader = self.accelerator.prepare(
-            self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader)
+        self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader = self.accelerator.prepare(
+            self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader)
 
         model_size = sum(p.numel() for p in self.v_predictor.parameters())
         self.accelerator.print(f"Model params: {model_size / 1024 / 1024:.2f} M")
@@ -284,7 +311,7 @@ class Trainer(object):
         self.val_iter = cycle(self.val_dataloader)
 
         self.reference_dict = {}
-
+        self.use_precomputed_latents = args.use_precomputed_latents
 
         if self.accelerator.is_main_process:
             self.output_dir = Path(output_dir)
@@ -341,15 +368,26 @@ class Trainer(object):
                 
                 # Using the dataloader directly is cleaner
                 for batch in self.dataloader:
-                    if self.step >= self.train_num_steps:
-                        break
+                    batch = {k: v.to(device) for k, v in batch.items()}
 
                     with accelerator.accumulate(self.v_predictor):
-                        with torch.no_grad():
-                            latent = self.ae.get_latents(input_ids=batch['input_ids'].to(self.ae.device),
-                                                         attn_mask=batch['attention_mask'].to(self.ae.device))
+                        if self.use_precomputed_latents:
+                            # The precomputed 'latents' are actually T5 embeddings.
+                            # We need to pass them through the VAE's encoder to get the
+                            # actual latents for the diffusion model.
+                            t5_embeddings = batch['input_latents']
+                            with torch.no_grad():
+                                # Note: The attention mask is not available with precomputed latents.
+                                # The `latents_from_embeddings` method will create a dummy mask of all ones.
+                                latent = self.ae.latents_from_embeddings(t5_embeddings)
+                        else:
+                            with torch.no_grad():
+                                latent = self.ae.get_latents(input_ids=batch['input_ids'],
+                                                             attn_mask=batch['attention_mask'])
                         
-                        latent = latent.to(device)
+                        # Cast latents to the diffusion model's dtype to prevent mismatch
+                        latent = latent.to(dtype=self.model_dtype)
+
                         x_0 = torch.randn_like(latent)
                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
 
@@ -391,7 +429,7 @@ class Trainer(object):
                             }
                             
                             # Validation Logic
-                            if self.step > 0 and self.step % 50 == 0:
+                            if self.step > 0 and self.step % self.eval_every == 0:
                                 self.v_predictor.eval()
                                 self.ema_model.eval()
 
@@ -402,7 +440,15 @@ class Trainer(object):
                                 with torch.no_grad():
                                     for val_batch in val_iter:
                                         val_batch = {k: v.to(device) for k, v in val_batch.items()}
-                                        latent = self.ae.get_latents(input_ids=val_batch['input_ids'], attn_mask=val_batch['attention_mask'])
+                                        if self.use_precomputed_latents:
+                                            t5_embeddings = val_batch['input_latents']
+                                            latent = self.ae.latents_from_embeddings(t5_embeddings)
+                                        else:
+                                            latent = self.ae.get_latents(input_ids=val_batch['input_ids'], attn_mask=val_batch['attention_mask'])
+                                        
+                                        # Cast latents to the diffusion model's dtype to prevent mismatch
+                                        latent = latent.to(dtype=self.model_dtype)
+
                                         x_0 = torch.randn_like(latent)
                                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
                                         
@@ -434,3 +480,5 @@ class Trainer(object):
 
                         if accelerator.is_main_process and self.step > 0 and self.step % self.save_and_sample_every == 0:
                             self.save()
+                
+        self.save()

@@ -184,7 +184,7 @@ class Trainer(object):
             from dataset_util.dataset_helper import get_dataloader_lvae_t5 as get_dataloader
             self.model, self.tokenizer, config = get_latent_vae_tokenizer_t5(args, ctx, self.num_dev)
             self.model: LatentVAEModel = self.model
-            self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
+            # self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
         else:
             raise Exception("i dunno, erm")
 
@@ -358,30 +358,6 @@ class Trainer(object):
 
                 for i in range(self.grad_accumulate):
                     batch = {k: v.to(device) for k,v in next(self.data_iter).items()}
-                    
-                    if self.accelerator.is_main_process and self.step == 0 and i == 0:
-                        # print("\n--- DEBUG: First training batch ---", flush=True)
-                        input_latents_tensor = batch['input_latents']
-                        # print(f"DEBUG Trainer: batch['input_latents'].shape: {input_latents_tensor.shape}", flush=True)
-                        # print(f"DEBUG Trainer: batch['input_latents'].dtype: {input_latents_tensor.dtype}", flush=True)
-                        
-                        if torch.isnan(input_latents_tensor).any():
-                            print("DEBUG Trainer: !!! NaN FOUND IN BATCH TENSOR !!!", flush=True)
-                        # else:
-                            # print("DEBUG Trainer: Batch tensor is clean.", flush=True)
-
-                        mean_val = input_latents_tensor.mean().item()
-                        std_val = input_latents_tensor.std().item()
-                        min_val = input_latents_tensor.min().item()
-                        max_val = input_latents_tensor.max().item()
-
-                        # print(f"DEBUG Trainer: batch['input_latents'].mean(): {mean_val}", flush=True)
-                        # print(f"DEBUG Trainer: batch['input_latents'].std(): {std_val}", flush=True)
-                        # print(f"DEBUG Trainer: batch['input_latents'].min(): {min_val}", flush=True)
-                        # print(f"DEBUG Trainer: batch['input_latents'].max(): {max_val}", flush=True)
-
-                        if std_val == 0:
-                            print("DEBUG Trainer: !!! BATCH TENSOR HAS ZERO VARIANCE !!!", flush=True)
 
                     with self.accelerator.autocast():
                         # torch.compiler.cudagraph_mark_step_begin()
@@ -437,3 +413,4 @@ class Trainer(object):
                         self.save()
 
         self.accelerator.print('Training complete')
+        self.save()

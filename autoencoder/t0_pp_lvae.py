@@ -75,9 +75,9 @@ class LatentVAEModel(T5ForConditionalGeneration):
                  layers_p = 4,  
                  ctx = nullcontext(),
                  num_dev: int = 1,
-                 dev: str = "cuda" if torch.cuda.is_available() else "cpu",) -> None: 
+                 dev: str = "cuda" if torch.cuda.is_available() else "cpu",
+                 use_precomputed_latents: bool = False) -> None: 
         super().__init__(config)
-
         cfg_enc, cfg_dec = create_enc_dec_cfg(dim=d_model, 
                                               latent_dim=latent_dim, 
                                               num_latents=num_latents, 
@@ -85,7 +85,6 @@ class LatentVAEModel(T5ForConditionalGeneration):
                                               max_tokens=max_tokens, 
                                               expansion_factor=expansion_factor, use_rope=use_rope, 
                                               base=rope_base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
-
         self.t5_output_norm = nn.LayerNorm(config.d_model)
 
         if d_model == config.d_model:
@@ -96,7 +95,7 @@ class LatentVAEModel(T5ForConditionalGeneration):
             self.proj_up = nn.Linear(d_model, config.d_model)
 
         self.vae = VariationalAutoEncoder(cfg_enc, cfg_dec)
-
+        
         self.vocab_size = vocab_size
         self.dim = cfg_enc.dim
         self.latent_dim = cfg_enc.latent_dim
@@ -105,9 +104,18 @@ class LatentVAEModel(T5ForConditionalGeneration):
         self.max_tokens = cfg_enc.max_tokens
         self.num_dev = num_dev
         self.freeze = ctx
+        
+        self.use_precomputed_latents = use_precomputed_latents
+        if self.use_precomputed_latents:
+            # When using precomputed latents, the T5 encoder is not needed.
+            # We delete it to save memory and speed up initialization.
+            # We DO need the VAE's encoder (self.vae.encoder), which processes the latents.
+            del self.encoder
+            self.encoder = None
 
-    
     def get_t5_encodings(self, input_ids: torch.Tensor, attn_mask: torch.Tensor):
+        if self.encoder is None:
+            raise ValueError("Cannot get T5 encodings when the model is in pre-computed latent mode.")
         with self.freeze:
             if self.num_dev > 1:
                 encoder_outs = self.module.get_encoder()(input_ids = input_ids, attention_mask = attn_mask.bool())
@@ -125,6 +133,19 @@ class LatentVAEModel(T5ForConditionalGeneration):
         encodings = self.get_t5_encodings(input_ids, attn_mask)[0]
         x = self.proj_down(encodings) 
         return self.vae.reparameterize(*self.vae.encode(x, attn_mask.bool()), only_mu=True)
+
+    def latents_from_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """
+        Takes T5 embeddings and returns VAE latents (mu).
+        This is for the diffusion training pipeline with precomputed T5 embeddings.
+        """
+        # Cast embeddings to the model's dtype to prevent mismatch
+        embeddings = embeddings.to(self.dtype)
+
+        projected_embeddings = self.proj_down(embeddings)
+        moments = self.vae.encode(projected_embeddings)
+        # For flow matching target, we only need the mean (mu) of the latent distribution
+        return self.vae.reparameterize(*moments, only_mu=True)
 
     # decode diffused latent 
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
@@ -181,14 +202,23 @@ class LatentVAEModel(T5ForConditionalGeneration):
         input_latents: Optional[torch.Tensor] = None,
         # This argument is for compatibility with generate()
         encoder_outputs: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> dict:
 
         if encoder_outputs is not None:
             # This path is used by .generate()
-            return super().forward(labels=labels, encoder_outputs=encoder_outputs)
+            # Make sure to pass along any other kwargs .generate() might be using
+            return super().forward(labels=labels, encoder_outputs=encoder_outputs, **kwargs)
 
         if input_latents is not None:
             # Pre-computed latent path
+
+            # Cast input latents to the model's float dtype to prevent mismatch
+            input_latents = input_latents.to(self.dtype)
+
+            if not self.use_precomputed_latents:
+                raise ValueError("`input_latents` was provided, but the model was not initialized with `use_precomputed_latents=True`.")
+            
             recon_latents, kld_loss = self.encode(input_latents)
             recon_loss = self.decode_loss(input_latents, recon_latents)
             # For generation, we need to wrap the reconstructed latents in a BaseModelOutput
@@ -202,8 +232,10 @@ class LatentVAEModel(T5ForConditionalGeneration):
 
         if input_ids is not None:
             # On-the-fly tokenization path
+            if self.use_precomputed_latents:
+                raise ValueError("`input_ids` was provided, but the model was initialized with `use_precomputed_latents=True`.")
             enc_outs, vae_loss = self.autoencode(input_ids, attention_mask)
-            lm_loss = super().forward(labels=labels, encoder_outputs=enc_outs).loss
+            lm_loss = super().forward(labels=labels, encoder_outputs=enc_outs, **kwargs).loss
 
             return {
                 'lm_loss': lm_loss,
@@ -218,6 +250,13 @@ def get_latent_vae_tokenizer_t5(args, ctx, num_dev: int = 1, base_t5: str = "big
     config = T5Config.from_pretrained(base_t5)
     tokenizer = T5Tokenizer.from_pretrained(base_t5)
 
+    # Load a standard T5 model to get its pre-trained weights.
+    # This is necessary for both the VAE-from-scratch path (to get a trained T5 encoder)
+    # and the pre-computed latent path (to get a trained T5 decoder for generation).
+    print(f"Loading pre-trained T5 weights from {base_t5}...")
+    pretrained_t5 = T5ForConditionalGeneration.from_pretrained(base_t5)
+    print("Pre-trained T5 model loaded.")
+
     print("\n" + "="*50)
     print("Initializing LatentVAEModel from scratch with the following parameters:")
     print(f"  d_model: {args.d_model}")
@@ -226,8 +265,10 @@ def get_latent_vae_tokenizer_t5(args, ctx, num_dev: int = 1, base_t5: str = "big
     print(f"  max_seq_len (as max_tokens): {args.max_seq_len}")
     print("="*50 + "\n")
 
-    # Instantiate the model directly, skipping the problematic from_pretrained
-    vae = LatentVAEModel(
+    # Instantiate our custom model from scratch.
+    # This ensures that our custom VAE components are initialized correctly,
+    # avoiding the zero-initialization issue from using `from_pretrained` directly.
+    vae_model = LatentVAEModel(
         config=config,
         vocab_size=len(tokenizer),
         d_model=args.d_model,
@@ -237,21 +278,32 @@ def get_latent_vae_tokenizer_t5(args, ctx, num_dev: int = 1, base_t5: str = "big
         max_tokens=args.max_seq_len,
         layers_p=args.num_layers,
         num_dev=num_dev,
-        ctx=ctx
+        ctx=ctx,
+        use_precomputed_latents=args.use_precomputed_latents
     )
 
+    # Manually copy the pre-trained weights from the standard T5 model.
+    # `strict=False` ensures that we only load weights for layers that match,
+    # leaving our custom VAE weights with their correct random initialization.
+    print("Copying pre-trained T5 weights into the LatentVAEModel...")
+    vae_model.load_state_dict(pretrained_t5.state_dict(), strict=False)
+    print("Weight copy complete.")
+
+    # Clean up the reference model to free up memory
+    del pretrained_t5
+
     if args.freeze_bb == 'ft':
-        for (param_name, param) in vae.named_parameters():
+        for (param_name, param) in vae_model.named_parameters():
             param.requires_grad = True
     elif args.freeze_bb == 'freeze':
-        for (param_name, param) in vae.named_parameters():
+        for (param_name, param) in vae_model.named_parameters():
             if re.fullmatch(".*vae.*", param_name):
                 param.requires_grad = True
                 # print(f"Trainable: {param_name}")
             else:
                 param.requires_grad = False
     
-    return vae, tokenizer, config  
+    return vae_model, tokenizer, config  
 
 
 if __name__ == "__main__": 

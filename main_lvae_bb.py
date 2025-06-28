@@ -13,7 +13,7 @@ import argparse
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", type=str, default="fineweb-edu_10b")
-    parser.add_argument("--max_seq_len", type=int, default=512)
+    parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--bb", type=str, default="t5")
     
     parser.add_argument("--train_bs", type=int, default=32) # 196
@@ -34,9 +34,9 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default="saved_latent_models")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--num_train_steps", type=int, default=5000)
+    parser.add_argument("--num_train_steps", type=int, default=195)
     parser.add_argument("--lr_schedule", type=str, default="linear")
-    parser.add_argument("--lr_warmup_steps", type=int, default=500)
+    parser.add_argument("--lr_warmup_steps", type=int, default=15)
     # parser.add_argument("--optimizer", type=str, default="adamw")
     # parser.add_argument("--adam_beta1", type=float, default=0.9)
     # parser.add_argument("--adam_beta2", type=float, default=0.999)
@@ -45,7 +45,7 @@ def main():
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default="no",
+        default="bf16",
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose"
@@ -68,8 +68,8 @@ def main():
     parser.add_argument("--resume_dir", type=str, default=None)
     
     # --- Arguments for Pre-computed Latents ---
-    parser.add_argument("--use_precomputed_latents", action="store_true", help="Use pre-computed latents for training.")
-    parser.add_argument("--precomputed_latent_path", type=str, default=None, help="Path to the directory of pre-computed latent .npy files.")
+    parser.add_argument("--no_precomputed_latents", action="store_false", dest="use_precomputed_latents", default=True, help="Disable using pre-computed latents for training.")
+    parser.add_argument("--precomputed_latent_path", type=str, default="precomputed_latents/bigscience__T0pp_latents", help="Path to the directory of pre-computed latent .npy files.")
 
     args = parser.parse_args()
 

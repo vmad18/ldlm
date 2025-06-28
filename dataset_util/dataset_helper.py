@@ -35,8 +35,12 @@ class PrecomputedLatentDataset(Dataset):
         latents_path = os.path.join(self.latent_dir, "latents.npy")
         if not os.path.exists(latents_path):
             raise FileNotFoundError(f"latents.npy not found in {self.latent_dir}")
+        
+        # Get shape and dtype from metadata
+        dtype = np.dtype(self.metadata['dtype'])
+        shape = (self.metadata['num_samples'], self.metadata['seq_len'], self.metadata['latent_dim'])
             
-        self.latents = np.load(latents_path, mmap_mode='r')
+        self.latents = np.memmap(latents_path, dtype=dtype, mode='r', shape=shape)
 
     def __len__(self):
         return self.num_samples
