@@ -90,9 +90,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pre-compute T5 latents for VAE training.")
     parser.add_argument("--model_name", type=str, default="t5-base", help="The T5 model to use for encoding.")
     parser.add_argument("--dataset_name", type=str, default="fineweb-edu_10b", help="The dataset to process.")
-    parser.add_argument("--shard_size", type=int, default=10000, help="Size of the dataset shard to process for testing. Use None for the full dataset.")
-    parser.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length for the tokenizer.")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for processing.")
+    parser.add_argument("--shard_size", type=int, default=1000000, help="Size of the dataset shard to process for testing. Use None for the full dataset.")
+    parser.add_argument("--max_seq_len", type=int, default=2048, help="Maximum sequence length for the tokenizer.")
+    parser.add_argument("--batch_size", type=int, default=1024, help="Batch size for processing.")
     parser.add_argument("--save_path", type=str, default="./precomputed_latents", help="Directory to save the latent files.")
     
     args = parser.parse_args()

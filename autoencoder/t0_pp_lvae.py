@@ -2,6 +2,7 @@ from contextlib import nullcontext
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
+import math
 
 from einops import rearrange, repeat
 
@@ -15,6 +16,7 @@ from contextlib import nullcontext
 from typing import Tuple, Optional, Any
 
 import re
+import sys
 
 class LatentEncoderConfig(Config): 
     
@@ -83,6 +85,8 @@ class LatentVAEModel(T5ForConditionalGeneration):
                                               max_tokens=max_tokens, 
                                               expansion_factor=expansion_factor, use_rope=use_rope, 
                                               base=rope_base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
+
+        self.t5_output_norm = nn.LayerNorm(config.d_model)
 
         if d_model == config.d_model:
             self.proj_down = nn.Identity() 
@@ -211,30 +215,31 @@ class LatentVAEModel(T5ForConditionalGeneration):
 
 
 def get_latent_vae_tokenizer_t5(args, ctx, num_dev: int = 1, base_t5: str = "bigscience/T0pp") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase, PretrainedConfig]:
-    config = T5ForConditionalGeneration.from_pretrained(base_t5).config 
+    config = T5Config.from_pretrained(base_t5)
     tokenizer = T5Tokenizer.from_pretrained(base_t5)
 
     print("\n" + "="*50)
-    print("Initializing LatentVAEModel with the following parameters:")
+    print("Initializing LatentVAEModel from scratch with the following parameters:")
     print(f"  d_model: {args.d_model}")
     print(f"  latent_dim: {args.latent_dim}")
     print(f"  num_latents: {args.num_latents}")
     print(f"  max_seq_len (as max_tokens): {args.max_seq_len}")
     print("="*50 + "\n")
 
-    vae = LatentVAEModel.from_pretrained(
-        base_t5,
-        config = config, 
-        vocab_size = len(tokenizer),
-        d_model = args.d_model, 
-        latent_dim = args.latent_dim, 
-        num_latents = args.num_latents, 
-        dim_head = args.dim_head, 
-        max_tokens = args.max_seq_len, 
-        layers_p = args.num_layers, 
-        num_dev = num_dev,
-        ctx = ctx, _fast_init = False) 
-    
+    # Instantiate the model directly, skipping the problematic from_pretrained
+    vae = LatentVAEModel(
+        config=config,
+        vocab_size=len(tokenizer),
+        d_model=args.d_model,
+        latent_dim=args.latent_dim,
+        num_latents=args.num_latents,
+        dim_head=args.dim_head,
+        max_tokens=args.max_seq_len,
+        layers_p=args.num_layers,
+        num_dev=num_dev,
+        ctx=ctx
+    )
+
     if args.freeze_bb == 'ft':
         for (param_name, param) in vae.named_parameters():
             param.requires_grad = True

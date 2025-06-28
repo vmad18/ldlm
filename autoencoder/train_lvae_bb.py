@@ -242,6 +242,7 @@ class Trainer(object):
         self.val_iter = cycle(self.val_dataloader)
 
         self.vae_loss_weight = 0.005
+        self.kld_weight = 1e-6
 
         self.latent_dim = 1024
         self.num_latents = 32 
@@ -280,37 +281,47 @@ class Trainer(object):
 
     def validation(self):
         self.model.eval()
-        val_loss = 0.
-        val_f1 = 0.
-        val_acc = 0.
-        # with torch.no_grad():
-        for i, batch in enumerate(self.val_dataloader):
-            with torch.no_grad():
+        total_val_loss = 0.
+        total_val_recon_loss = 0.
+        total_val_kld_loss = 0.
+
+        with torch.no_grad():
+            for i, batch in enumerate(self.val_dataloader):
                 losses = self.model(**batch)
                 if self.args.use_precomputed_latents:
-                    loss = losses['reconstruction_loss'] + losses['kld_loss']
+                    recon_loss = losses['reconstruction_loss']
+                    kld_loss = losses['kld_loss']
+                    loss = recon_loss + self.kld_weight * kld_loss
+
+                    total_val_recon_loss += recon_loss.item()
+                    total_val_kld_loss += (self.kld_weight * kld_loss.item())
                 else:
                     loss = losses['lm_loss'] + self.vae_loss_weight * losses['vae_loss']
+                
+                total_val_loss += loss.item()
 
-            val_loss += loss.item()
-
-            if self.accelerator.is_main_process and i == 0:
-                with torch.no_grad():
+                if self.accelerator.is_main_process and i == 0:
                     # use the encoder_outputs from the model's forward pass
                     enc_outs = losses['encoder_outputs']
-                    if self.use_ema:
+                    if hasattr(self, 'use_ema') and self.use_ema:
                         generated_ids = self.ema.ema_model.generate(encoder_outputs=enc_outs, **generate_kwargs["beam"])
                     else:
                         generated_ids = self.model.generate(encoder_outputs=enc_outs, **generate_kwargs["beam"])
 
-                generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                    generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
-                for j in range(len(generated_text)):
-                    self.accelerator.print(f"Sample {j}: {generated_text[j]}")
+                    for j in range(len(generated_text)):
+                        self.accelerator.print(f"Sample {j}: {generated_text[j]}")
 
+        num_batches = len(self.val_dataloader)
+        avg_val_loss = total_val_loss / num_batches
+        
+        log_data = {"val/loss": avg_val_loss}
+        if self.args.use_precomputed_latents:
+            log_data["val/recon_loss"] = total_val_recon_loss / num_batches
+            log_data["val/kld_loss"] = total_val_kld_loss / num_batches
 
-        val_loss = val_loss / len(self.val_dataloader)
-        self.accelerator.log({"val_loss": val_loss})
+        self.accelerator.log(log_data, step=self.step)
         self.model.train()
 
     def train(self):
@@ -324,12 +335,12 @@ class Trainer(object):
         with self.accelerator.autocast():
             losses = self.model(**warmup_data)
             if self.args.use_precomputed_latents:
-                loss = (losses['reconstruction_loss'] + losses['kld_loss']) / self.grad_accumulate
+                loss = (losses['reconstruction_loss'] + self.kld_weight * losses['kld_loss']) / self.grad_accumulate
             else:
                 loss = (losses['lm_loss'] + self.vae_loss_weight * losses['vae_loss']) / self.grad_accumulate
 
         self.accelerator.backward(loss)
-        self.opt.step()
+        # self.opt.step()
         self.opt.zero_grad()
         self.accelerator.wait_for_everyone()
 
@@ -337,21 +348,53 @@ class Trainer(object):
             self.accelerator.print("Warm-up pass complete.")
         # --- End Warm-up Pass ---
 
-        with tqdm(initial=self.step, total=self.train_num_steps) as pbar:
+        with tqdm(initial=self.step, total=self.train_num_steps, disable=not self.accelerator.is_main_process) as pbar:
             while self.step < self.train_num_steps:
                 self.model.train()
 
                 total_loss = 0.
+                total_recon_loss = 0.
+                total_kld_loss = 0.
 
-                for _ in range(self.grad_accumulate):
+                for i in range(self.grad_accumulate):
                     batch = {k: v.to(device) for k,v in next(self.data_iter).items()}
+                    
+                    if self.accelerator.is_main_process and self.step == 0 and i == 0:
+                        # print("\n--- DEBUG: First training batch ---", flush=True)
+                        input_latents_tensor = batch['input_latents']
+                        # print(f"DEBUG Trainer: batch['input_latents'].shape: {input_latents_tensor.shape}", flush=True)
+                        # print(f"DEBUG Trainer: batch['input_latents'].dtype: {input_latents_tensor.dtype}", flush=True)
+                        
+                        if torch.isnan(input_latents_tensor).any():
+                            print("DEBUG Trainer: !!! NaN FOUND IN BATCH TENSOR !!!", flush=True)
+                        # else:
+                            # print("DEBUG Trainer: Batch tensor is clean.", flush=True)
+
+                        mean_val = input_latents_tensor.mean().item()
+                        std_val = input_latents_tensor.std().item()
+                        min_val = input_latents_tensor.min().item()
+                        max_val = input_latents_tensor.max().item()
+
+                        # print(f"DEBUG Trainer: batch['input_latents'].mean(): {mean_val}", flush=True)
+                        # print(f"DEBUG Trainer: batch['input_latents'].std(): {std_val}", flush=True)
+                        # print(f"DEBUG Trainer: batch['input_latents'].min(): {min_val}", flush=True)
+                        # print(f"DEBUG Trainer: batch['input_latents'].max(): {max_val}", flush=True)
+
+                        if std_val == 0:
+                            print("DEBUG Trainer: !!! BATCH TENSOR HAS ZERO VARIANCE !!!", flush=True)
+
                     with self.accelerator.autocast():
-                        torch.compiler.cudagraph_mark_step_begin()
+                        # torch.compiler.cudagraph_mark_step_begin()
                         losses = self.model(**batch)
 
                         if self.args.use_precomputed_latents:
                             # Loss for VAE-only training on latents
-                            loss = losses['reconstruction_loss'] + losses['kld_loss']
+                            recon_loss = losses['reconstruction_loss']
+                            kld_loss = losses['kld_loss']
+                            
+                            total_recon_loss += recon_loss.item() / self.grad_accumulate
+                            total_kld_loss += (self.kld_weight * kld_loss.item()) / self.grad_accumulate
+                            loss = recon_loss + self.kld_weight * kld_loss
                         else:
                             # Loss for end-to-end training
                             loss = losses['lm_loss'] + self.vae_loss_weight * losses['vae_loss']
@@ -370,6 +413,12 @@ class Trainer(object):
                 self.opt.zero_grad()
 
                 self.step += 1
+                
+                log_dict = {'loss': total_loss}
+                if self.args.use_precomputed_latents:
+                    log_dict['recon_loss'] = total_recon_loss
+                    log_dict['kld_loss'] = total_kld_loss
+                pbar.set_postfix(**log_dict)
                 pbar.update(1)
 
                 if self.accelerator.is_main_process:
@@ -377,6 +426,9 @@ class Trainer(object):
                         self.validation()
                     
                     log_data = {'train/loss': total_loss, 'lr': self.lr_scheduler.get_last_lr()[0]}
+                    if self.args.use_precomputed_latents:
+                        log_data['train/recon_loss'] = total_recon_loss
+                        log_data['train/kld_loss'] = total_kld_loss
                     if self.accelerator.sync_gradients:
                         log_data['train/grad_norm'] = grad_norm
                     self.accelerator.log(log_data, step=self.step)

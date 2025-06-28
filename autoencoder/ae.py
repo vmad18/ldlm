@@ -1,6 +1,7 @@
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
+import sys
 
 from einops import rearrange, repeat
 from math import sqrt, log  
@@ -246,7 +247,7 @@ class AutoEncodingBlock(nn.Module):
         self.ln1 = nn.LayerNorm(cfg.dim, device = cfg.dev)
         self.ln2 = nn.LayerNorm(cfg.latent_dim, device = cfg.dev) 
 
-    def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]: 
+    def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         latents = self.attn(x, latents, mask) + latents
         x_trans = self.ffn1(self.ln1(x)) + x 
         latents = self.ffn2(self.ln2(latents)) + latents 
@@ -263,24 +264,29 @@ class PerceiverResampler(nn.Module):
         self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim), device=cfg.dev))
         nn.init.normal_(self.latents, std = 0.02) 
 
-        self.layers = nn.ModuleList([])
+        self.blocks = nn.ModuleList([])
 
         for _ in range(cfg.layers_p):
-            self.layers.append(AutoEncodingBlock(cfg))
+            self.blocks.append(AutoEncodingBlock(cfg))
 
         self.f_attn = PerceiverAttention(cfg)
-        self.latent_norm = nn.LayerNorm(cfg.latent_dim, device = cfg.dev)
+        self.latent_norm = nn.LayerNorm(cfg.latent_dim, device=cfg.dev)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, *_ = x.shape
 
         x = x + self.pos_embed(x)
-        latents = repeat(self.latents, "s d -> b s d", b = b)
-        for layer in self.layers:
-            x, latents = layer(x, latents, mask) 
         
+        latents = repeat(self.latents, "n d -> b n d", b = x.shape[0])
+
+        for i, block in enumerate(self.blocks):
+            x, latents = block(x, latents, mask)
+
         latents = self.f_attn(x, latents, mask)
-        return self.latent_norm(latents)
+
+        latents = self.latent_norm(latents)
+
+        return latents
 
 
 class VariationalAutoEncoder(nn.Module):
@@ -324,8 +330,8 @@ class VariationalAutoEncoder(nn.Module):
             print(f"[VAE ERROR] Shape mismatch in loss calculation:")
             print(f"  --> recon_x shape: {recon_x.shape}")
             print(f"  --> x shape:       {x.shape}")
-        recon_loss = F.mse_loss(recon_x, x, reduction='sum')
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+        recon_loss = F.mse_loss(recon_x, x, reduction='mean')
+        kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
