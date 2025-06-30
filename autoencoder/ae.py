@@ -14,6 +14,7 @@ class Config:
             dim: int = 1024,
             num_latents: int = 16,
             latent_dim: int = 1024,
+            model_dim: int = 1024,
             dim_head: int = 128,
             max_tokens: int = 1024,
             expansion_factor: int = 4,
@@ -26,6 +27,7 @@ class Config:
         self.dim: int = dim
         self.num_latents: int = num_latents
         self.latent_dim: int = latent_dim
+        self.model_dim: int = model_dim
         self.dim_head: int = dim_head
         self.max_tokens: int = max_tokens
 
@@ -38,74 +40,23 @@ class Config:
         self.layers_p = layers_p
         self.dev = dev
 
-class EncConfig(Config):
-
-    dim: int = 512
-    latent_dim: int = 1024
-    num_latents: int = 16
-    dim_head: int = 128
-    max_tokens: int = 1024
-
-    expansion_factor: int = 4
-
-    use_rope: bool = True
-    base: int = int(1e5)
-    qk_norm: bool = False
-
-    layers_p = 8
-
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-
-class DecConfig(Config):
-
-    dim: int = 1024
-    latent_dim: int = 512
-    num_latents: int = 1024
-    dim_head: int = 128
-    max_tokens: int = 16
-
-    expansion_factor: int = 4
-
-    use_rope: bool = True
-    base: int = int(1e5)
-    qk_norm: bool = False
-
-    layers_p = 8
-
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 def create_enc_dec_cfg(
-    dim: int = 1024,
-    latent_dim: int = 512,
-    num_latents: int = 1024,
-    dim_head: int = 128,
-    max_tokens: int = 16,
-    expansion_factor: int = 4,
-    use_rope: bool = True,
-    base: int = int(1e5),
-    qk_norm: bool = False,
-    layers_p = 8,
-    dev = "cuda" if torch.cuda.is_available() else "cpu",
+    **kwargs
 ) -> Tuple[Config, Config]:
     # Encoder config: Takes in a sequence of `max_tokens` vectors, each of dimension `dim`.
     # Outputs `num_latents` vectors, each of dimension `latent_dim`.
-    enc_cfg = Config(dim=dim,
-                     latent_dim=latent_dim,
-                     num_latents=num_latents,
-                     dim_head=dim_head, max_tokens=max_tokens,
-                     expansion_factor=expansion_factor, use_rope=use_rope,
-                     base=base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
+    enc_cfg = Config(**kwargs)
+
+    # For the decoder, we swap some params. Pop `max_tokens` from a copy of kwargs
+    # to avoid passing it twice to the Config constructor.
+    dec_kwargs = kwargs.copy()
+    dec_kwargs['latent_dim'], dec_kwargs['dim'] = dec_kwargs['dim'], dec_kwargs['latent_dim']
+    dec_kwargs['num_latents'], dec_kwargs['max_tokens'] = dec_kwargs['max_tokens'], dec_kwargs['num_latents']
 
     # Decoder config: Takes in `num_latents` vectors (from encoder), each of dimension `latent_dim`.
     # Outputs `max_tokens` vectors (reconstructed), each of dimension `dim`.
-    dec_cfg = Config(dim=latent_dim,           # Decoder input dim is encoder's output dim
-                     latent_dim=dim,           # Decoder output dim is encoder's input dim
-                     num_latents=max_tokens,   # Decoder output length is encoder's input length
-                     dim_head=dim_head, 
-                     max_tokens=num_latents,   # Decoder input length is encoder's output length
-                     expansion_factor=expansion_factor, use_rope=use_rope,
-                     base=base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
+    dec_cfg = Config(**dec_kwargs)
     return enc_cfg, dec_cfg
 
 
@@ -175,7 +126,11 @@ class FeedForward(nn.Module):
     def __init__(self, cfg: Config, dim: int) -> None:
         super().__init__()
         self.proj_up = nn.Linear(dim, cfg.expansion_factor * dim, device = cfg.dev)
-        self.proj_down = nn.Linear(cfg.expansion_factor * dim, dim, device = cfg.dev)
+        
+        in_features = cfg.expansion_factor * dim
+        out_features = dim
+
+        self.proj_down = nn.Linear(in_features, out_features, device = cfg.dev)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor: 
         x = self.proj_up(x) 
@@ -189,7 +144,7 @@ class PerceiverAttention(nn.Module):
     def __init__(self, cfg: Config) -> None:
         super().__init__()
        
-        inner_dim = max(cfg.dim, cfg.latent_dim)
+        inner_dim = cfg.model_dim
         
         self.scale = 1./sqrt(inner_dim)
 
@@ -290,17 +245,26 @@ class PerceiverResampler(nn.Module):
 
 
 class VariationalAutoEncoder(nn.Module):
-    def __init__(self, cfg_enc: Config, cfg_dec: Config) -> None:
+    def __init__(self, cfg_enc: Config, cfg_dec: Config, create_encoder: bool = True) -> None:
         super().__init__()
-        print("Making encoder...")
-        self.encoder = PerceiverResampler(cfg_enc)
-        print("Encoder made.")
+        self.create_encoder = create_encoder
+
+        if self.create_encoder:
+            self.encoder = PerceiverResampler(cfg_enc)
+            self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
+        else:
+            self.encoder = None
+            self.mu_lsigma = None
+            print("Skipping VAE encoder creation to save memory.")
+
+        print("Making decoder...")
         self.decoder = PerceiverResampler(cfg_dec)
         print("Decoder made.")
-        self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
 
     def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encodes the input and returns the mean and log-variance vectors."""
+        if not self.create_encoder:
+            raise NotImplementedError("Cannot call .encode() on a VAE that was initialized without an encoder (create_encoder=False).")
         enc_output = self.encoder(x, mask)
         
         mu, log_var = self.mu_lsigma(enc_output).chunk(2, dim=-1)
@@ -345,10 +309,11 @@ class VariationalAutoEncoder(nn.Module):
 
 
 if __name__ == "__main__":
-    e_cfg = EncConfig()
-    d_cfg = DecConfig()
+    e_cfg, d_cfg = create_enc_dec_cfg(dim=1024, latent_dim=512, num_latents=16, model_dim=1024, max_tokens=1024)
     attn = VariationalAutoEncoder(e_cfg, d_cfg)
-    # latents = torch.randn((3, 16, 1024)).cuda()
-    x = torch.randn((3, 300, 512)).cuda()
-
-    print(attn(x).shape) 
+    # This block is for testing purposes.
+    # x = torch.randn((3, 1024, 1024)).cuda()
+    # recon_x, mu, log_var = attn(x)
+    # print(recon_x.shape)
+    
+    print("VAE initialized successfully for testing.") 

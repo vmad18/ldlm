@@ -119,20 +119,10 @@ class Trainer(object):
 
     def __init__(self,
                  args,
-                 dataset_name,
-                 train_bs=32,
-                 eval_bs=64,
                  init_lr=1e-4,
-                 train_num_steps=100000,
                  lr_schedule="cosine",
-                 num_warmup_steps=500,
                  adam_betas=(0.9, 0.99),
                  adam_weight_decay=0.01,
-                 num_samples=None,
-                 eval_every=1000,
-                 results_folder="./results",
-                 mixed_percision="no",
-                 grad_accumulate: int = 16,
                  seed=412,
                  ) -> None:
         super().__init__()
@@ -141,12 +131,15 @@ class Trainer(object):
 
         self.args = args
 
+        self.sample_every = args.sample_every
+        self.num_samples_to_gen = args.num_samples_to_gen
+
         self.best_val_metric = 0
-        self.num_samples = num_samples
+        self.num_samples = args.num_samples
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
-            # mixed_percision = mixed_percision, 
+            mixed_precision = args.mixed_precision, 
             log_with="wandb",
             kwargs_handlers=[ddp_kwargs]
         )
@@ -157,14 +150,21 @@ class Trainer(object):
             if args.output_dir is None:
                 args.output_dir = get_output_dir(args)
             results_folder = args.output_dir
+
+            config_dict = args.__dict__
             with open(os.path.join(args.output_dir, 'args.json'), 'w') as f:
-                json.dump(args.__dict__, f, indent=2)
+                json.dump(config_dict, f, indent=2)
             run = os.path.split(__file__)[-1].split(".")[0]
             if args.wandb_name:
-                self.accelerator.init_trackers(run, config=args,
-                                               init_kwargs={"wandb": {"dir": results_folder, "name": args.wandb_name}})
+                self.accelerator.init_trackers(
+                    run, config=config_dict,
+                    init_kwargs={"wandb": {"dir": results_folder, "name": args.wandb_name}}
+                )
             else:
-                self.accelerator.init_trackers(run, config=args, init_kwargs={"wandb": {"dir": results_folder}})
+                self.accelerator.init_trackers(
+                    run, config=config_dict,
+                    init_kwargs={"wandb": {"dir": results_folder}}
+                )
 
         if args.freeze_bb == "freeze":
             print("Using Frozen T5/BART Backbone")
@@ -193,14 +193,14 @@ class Trainer(object):
         if self.accelerator.is_main_process:
             self.accelerator.print(f'num trainable params: {num_trainable_params}')
 
-        self.eval_every = eval_every
+        self.eval_every = args.eval_every
 
-        self.train_bs = train_bs
-        self.eval_bs = eval_bs
+        self.train_bs = args.train_bs
+        self.eval_bs = args.eval_bs
 
-        self.train_num_steps = train_num_steps
+        self.num_train_steps = args.num_train_steps
 
-        self.dataset = get_dataset(dataset_name)
+        self.dataset = get_dataset(args.dataset_name)
 
         if args.eval:
             self.dataset["train"] = self.dataset["train"].select(range(1000))
@@ -209,29 +209,29 @@ class Trainer(object):
                                           context_tokenizer=self.tokenizer,
                                           use_precomputed_latents=args.use_precomputed_latents,
                                           precomputed_latent_path=args.precomputed_latent_path,
-                                          batch_size=train_bs)
+                                          batch_size=args.train_bs)
         self.val_dataloader = get_dataloader(args, self.dataset['valid'], config, self.tokenizer, args.max_seq_len,
                                              shuffle=False, context_tokenizer=self.tokenizer,
                                              use_precomputed_latents=args.use_precomputed_latents,
                                              precomputed_latent_path=args.precomputed_latent_path,
-                                             batch_size=eval_bs)
+                                             batch_size=args.eval_bs)
         self.max_seq_len = args.max_seq_len
 
         self.opt = get_adamw_optimizer(self.model.parameters(), lr=init_lr, betas=adam_betas,
                                        weight_decay=adam_weight_decay)
 
-        self.grad_accumulate = grad_accumulate
+        self.grad_accumulate = args.grad_accumulate
         
         lr_scheduler = get_scheduler(
             lr_schedule,
             optimizer=self.opt,
-            num_warmup_steps=num_warmup_steps * self.num_dev,
-            num_training_steps=train_num_steps * self.num_dev,
+            num_warmup_steps=args.lr_warmup_steps * self.num_dev,
+            num_training_steps=args.num_train_steps * self.num_dev,
         )
 
         if self.accelerator.is_main_process:
-            self.results_folder = Path(results_folder)
-            self.results_folder.mkdir(exist_ok=True)
+            self.save_dir = Path(args.save_dir)
+            self.save_dir.mkdir(exist_ok=True)
 
         self.step = 0
 
@@ -242,42 +242,95 @@ class Trainer(object):
         self.val_iter = cycle(self.val_dataloader)
 
         self.vae_loss_weight = 0.005
-        self.kld_weight = 1e-6
+        self.kld_weight = args.kld_weight
 
-        self.latent_dim = 1024
-        self.num_latents = 32 
+        self.latent_dim = args.latent_dim
+        self.num_latents = args.num_latents
 
     def save(self):
         if not self.accelerator.is_main_process:
             return
 
+        model_path = os.path.join(self.args.save_dir, 'vae.pt')
+        
+        # We need to save the args along with the model state
         data = {
-            'step': self.step,
-            'model': self.accelerator.get_state_dict(self.model),
-            'opt': self.opt.state_dict(),
-            'scaler': self.accelerator.scaler.state_dict() if self.accelerator.scaler is not None else None
+            'args': self.args,
+            'model_state_dict': self.accelerator.get_state_dict(self.model)
         }
 
-        torch.save(data, str(self.results_folder / f'model.pt'))
+        torch.save(data, model_path)
+        print(f'Saved VAE model and args to {model_path}')
+
+    @torch.no_grad()
+    def sample_from_prior(self):
+        """
+        Samples from the VAE by decoding random latents from the prior (N(0,I)).
+        """
+        if not self.accelerator.is_main_process:
+            return
+        
+        self.model.eval()
+
+        model_to_generate_with = self.accelerator.unwrap_model(self.model)
+
+        latents = torch.randn(
+            (self.num_samples_to_gen, model_to_generate_with.num_latents, model_to_generate_with.latent_dim),
+            device=self.accelerator.device
+        ).to(model_to_generate_with.dtype)
+
+        # Use the decode_latent method from our VAE model
+        generated_ids = model_to_generate_with.decode_latent(latents, **generate_kwargs['nucleus'])
+        generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+        print("\n" + "─" * 50)
+        print(f"Sampling from prior at step {self.step}")
+        for i, text in enumerate(generated_texts):
+            print(f"  Sample {i+1}: {text}")
+        print("─" * 50 + "\n")
+
+        # Log to wandb
+        try:
+            table = wandb.Table(columns=["step", "sample_id", "generated_text"])
+            for i, text in enumerate(generated_texts):
+                table.add_data(self.step, i + 1, text)
+            self.accelerator.log({"generated_samples_from_prior": table}, step=self.step)
+        except Exception as e:
+            print(f"Wandb logging for samples failed: {e}")
+
+        self.model.train()
 
     def load(self, file_path=None, resume_training=False):
-        file_path = Path(file_path) if exists(file_path) else self.results_folder
-        accelerator = self.accelerator
-        device = accelerator.device
+        if file_path is None:
+            file_path = self.args.resume_dir
+        
+        if not os.path.exists(file_path):
+            print(f"Checkpoint not found at {file_path}. Starting from scratch.")
+            return
 
-        data = torch.load(str(file_path / f'model.pt'), map_location=device)
+        model_path = os.path.join(file_path, 'vae.pt')
+        if not os.path.exists(model_path):
+            print(f"vae.pt not found in {file_path}. Starting from scratch.")
+            return
 
-        model = self.accelerator.unwrap_model(self.model)
-        model.load_state_dict(data['model'])
+        data = torch.load(model_path, map_location='cpu')
 
-        self.step = data['step']
-        self.opt.load_state_dict(data['opt'])
-        if exists(self.accelerator.scaler) and exists(data['scaler']):
-            self.accelerator.scaler.load_state_dict(data['scaler'])
+        # Handle both old and new checkpoint formats
+        if 'model_state_dict' in data:
+            model_state_dict = data['model_state_dict']
+        else:
+            # Old format: the file is the state dict itself
+            print("Loading VAE from an older checkpoint format.")
+            model_state_dict = data
+
+        self.model.load_state_dict(model_state_dict)
+
         if resume_training:
-            for _ in range(self.step):
-                self.lr_scheduler.step()
-
+            # If we need to resume optimizer state, etc., it would be loaded here.
+            # For now, we only load model weights.
+            print("Resuming training with loaded model weights.")
+        else:
+            print(f"Loaded model weights from {model_path}")
 
     def validation(self):
         self.model.eval()
@@ -348,8 +401,8 @@ class Trainer(object):
             self.accelerator.print("Warm-up pass complete.")
         # --- End Warm-up Pass ---
 
-        with tqdm(initial=self.step, total=self.train_num_steps, disable=not self.accelerator.is_main_process) as pbar:
-            while self.step < self.train_num_steps:
+        with tqdm(initial=self.step, total=self.num_train_steps, disable=not self.accelerator.is_main_process) as pbar:
+            while self.step < self.num_train_steps:
                 self.model.train()
 
                 total_loss = 0.
@@ -369,7 +422,7 @@ class Trainer(object):
                             kld_loss = losses['kld_loss']
                             
                             total_recon_loss += recon_loss.item() / self.grad_accumulate
-                            total_kld_loss += (self.kld_weight * kld_loss.item()) / self.grad_accumulate
+                            total_kld_loss += (kld_loss.item()) / self.grad_accumulate
                             loss = recon_loss + self.kld_weight * kld_loss
                         else:
                             # Loss for end-to-end training
@@ -401,6 +454,9 @@ class Trainer(object):
                     if self.step % self.eval_every == 0:
                         self.validation()
                     
+                    if self.sample_every > 0 and self.step > 0 and self.step % self.sample_every == 0:
+                        self.sample_from_prior()
+
                     log_data = {'train/loss': total_loss, 'lr': self.lr_scheduler.get_last_lr()[0]}
                     if self.args.use_precomputed_latents:
                         log_data['train/recon_loss'] = total_recon_loss

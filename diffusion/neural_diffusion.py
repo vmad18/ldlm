@@ -247,9 +247,9 @@ class DiTModel(nn.Module):
 
 
     # t: torch.Tensor, ctx: torch.Tensor
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        t = t.squeeze(1) # TODO get rid of this 
-        t = t.squeeze(1) # TODO get rid of this 
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        t = t.squeeze(1)
+        t = t.squeeze(1)
         ctx = torch.zeros_like(x)
         
         x = self.input_proj(x)

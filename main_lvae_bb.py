@@ -21,17 +21,22 @@ def main():
     
     parser.add_argument("--d_model", type=int, default=512)
     parser.add_argument("--latent_dim", type=int, default=1024)
-    parser.add_argument("--num_latents", type=int, default=64)
+    parser.add_argument("--num_latents", type=int, default=128)
+    parser.add_argument("--sample_every", type=int, default=15)
+    parser.add_argument("--num_samples_to_gen", type=int, default=1)
+    parser.add_argument("--kld_weight", type=float, default=1e-5)
 
     parser.add_argument("--dim_head", type=int, default=128)
-    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--num_layers", type=int, default=4)
+
+    parser.add_argument("--num_samples", type=int, default=None)
+    parser.add_argument("--grad_accumulate", type=int, default=16)
     
     # parser.add_argument("--num_encoder_latents", type=int, default=32)
     # parser.add_argument("--num_decoder_latents", type=int, default=32)
     # parser.add_argument("--dim_ae", type=int, default=256)
     # parser.add_argument("--num_layers", type=int, default=2)
     # parser.add_argument("--l2_normalize_latents", action="store_true")
-    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default="saved_latent_models")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_train_steps", type=int, default=195)
@@ -73,16 +78,7 @@ def main():
 
     args = parser.parse_args()
 
-    trainer = Trainer(args, 
-                      dataset_name = args.dataset_name, 
-                      train_bs = args.train_bs, 
-                      eval_bs = args.eval_bs, 
-                      init_lr = args.learning_rate, 
-                      train_num_steps = args.num_train_steps, 
-                      lr_schedule = args.lr_schedule, 
-                      num_warmup_steps = args.lr_warmup_steps, 
-                      eval_every = args.eval_every, 
-                      )
+    trainer = Trainer(args)
 
     trainer.train() 
 

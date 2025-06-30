@@ -31,6 +31,7 @@ import os
 import copy
 
 from typing import Optional, Tuple
+import torch.distributed as dist
 
 from pathlib import Path
 from datetime import datetime
@@ -38,6 +39,8 @@ import json
 import random
 
 from ldlm.dataset_util.dataset_helper import get_dataset, get_dataloader_lvae_t5
+
+__version__ = "0.0.1"
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -80,6 +83,7 @@ def euler_solver(x_0, t_steps: torch.Tensor, model: DiTModel, pbar=None):
 
     for t_step in range(t_steps.shape[0] - 1):
         t = t_steps[t_step] * torch.ones(x_0.shape[0], device=x_0.device)
+        t = ConditionalFlowMatcher.pad_t_like_x(t, x)
         dx = model(x, t)  # approx. trajectory step
         x = x + dx * dt  # euler integrate
 
@@ -95,13 +99,12 @@ def gen_samples(
         dim_latents: int,
         batch_size: int,
         accelerator: Accelerator,
-        step: int,  # current training step
         steps: int,  # number of gen steps
+        target_dtype: torch.dtype,
         method: str = "euler"):
-    model.eval()
-
+    # The caller of this function should handle model.eval() and model.train()
     with torch.no_grad():
-        x_0 = torch.randn((batch_size, num_latents, dim_latents), device=accelerator.device)
+        x_0 = torch.randn((batch_size, num_latents, dim_latents), device=accelerator.device, dtype=target_dtype)
         t_steps = torch.linspace(0, 1, steps, device=accelerator.device)
 
         if method == "euler":
@@ -109,9 +112,7 @@ def gen_samples(
         else:
             raise NotImplementedError
 
-    # TODO save traj results to wandb
-
-    model.train()
+    return traj
 
 
 def compute_grad_norm(parameters):
@@ -151,24 +152,91 @@ def ema(source: nn.Module, target: nn.Module, decay: float):
 
 class Trainer(object):
 
+    @classmethod
+    def from_pretrained_for_generation(cls, checkpoint_dir: str, mixed_precision: str = "bf16"):
+        """
+        Loads a pre-trained model from a checkpoint directory for generation.
+        This is a factory method that constructs a trainer in "generation mode"
+        without needing to instantiate any of the training-specific components.
+        """
+        checkpoint_dir = Path(checkpoint_dir)
+        
+        # --- 1. Load Training Args from Checkpoint ---
+        # Be specific to avoid loading the vae.pt file by mistake
+        model_files = list(checkpoint_dir.glob('model-*.pt')) + list(checkpoint_dir.glob('model.pt'))
+        if not model_files:
+            raise FileNotFoundError(f"No diffusion model checkpoint found in {checkpoint_dir}")
+        model_checkpoint_path = max(model_files, key=os.path.getctime)
+        print(f"Loading diffusion model checkpoint from: {model_checkpoint_path}")
+        data = torch.load(model_checkpoint_path, map_location='cpu', weights_only=False)
+        
+        if 'args' not in data:
+            raise ValueError(f"Checkpoint {model_checkpoint_path} does not contain 'args'. Cannot restore model.")
+        args = data['args']
+
+        # --- 2. Create a bare Trainer instance and Accelerator ---
+        trainer = cls.__new__(cls)
+        trainer.accelerator = Accelerator(mixed_precision=mixed_precision)
+
+        # --- 3. Manually Set Up VAE and Tokenizer ---
+        vae_args_path = checkpoint_dir / 'vae_args.json'
+        if not vae_args_path.exists():
+            raise FileNotFoundError(f"VAE args not found at {vae_args_path}. Checkpoint directory may be incomplete.")
+        with open(vae_args_path, 'r') as f:
+            trainer.vae_args = json.load(f)
+        
+        trainer.tokenizer = AutoTokenizer.from_pretrained("bigscience/T0pp", use_fast=False)
+        vae_model_path = checkpoint_dir / 'vae.pt'
+        if not vae_model_path.exists():
+            raise FileNotFoundError(f"VAE model not found at {vae_model_path}. Checkpoint directory may be incomplete.")
+        trainer.ae = torch.load(vae_model_path, map_location='cpu', weights_only=False)
+        trainer.ae.to(trainer.accelerator.device)
+        trainer.ae.eval()
+
+        # --- 4. Manually Set Up Diffusion Model ---
+        trainer.num_latents = trainer.ae.num_latents
+        trainer.latent_dim = trainer.ae.latent_dim
+        cfg_dit = DiTConfig()
+        cfg_dit.dim = args.model_dim
+        cfg_dit.num_latents = trainer.num_latents
+        cfg_dit.latent_dim = trainer.latent_dim
+        cfg_dit.num_layers = args.num_layers
+        cfg_dit.dev = trainer.accelerator.device
+        
+        trainer.v_predictor = DiTModel(cfg_dit)
+        trainer.ema_model = copy.deepcopy(trainer.v_predictor)
+
+        # --- 5. Prepare Models and Set Generation Attributes ---
+        trainer.v_predictor, trainer.ema_model = trainer.accelerator.prepare(trainer.v_predictor, trainer.ema_model)
+        trainer.output_dir = checkpoint_dir
+        trainer.step = 0 # Will be updated by load()
+
+        if trainer.accelerator.mixed_precision == "fp16":
+            trainer.model_dtype = torch.float16
+        elif trainer.accelerator.mixed_precision == "bf16":
+            trainer.model_dtype = torch.bfloat16
+        else:
+            trainer.model_dtype = torch.float32
+        
+        # --- 6. Load the Model Weights ---
+        trainer.load(model_checkpoint_path)
+        
+        return trainer
+
     def __init__(self,
                  args: Namespace,
-                 gradient_accumulate_every=1,
-                 init_lr=1e-4,
-                 num_warmup_steps=500,
-                 ema_decay=0.995,
-                 adam_betas=(0.9, 0.99),
-                 adam_weight_decay=0.01,
                  mixed_precision="no",
                  report_with: str = "wandb",
                  output_dir: str = "./results",
+                 log_dir: str = './logs/',
                  ) -> None:
+        # This __init__ method is now EXCLUSIVELY for training.
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         init_process_kwargs = InitProcessGroupKwargs(timeout=timedelta(minutes=90))
 
         self.accelerator = Accelerator(
             mixed_precision=mixed_precision,
-            gradient_accumulation_steps=gradient_accumulate_every,
+            gradient_accumulation_steps=args.grad_accumulate,
             log_with=report_with,
             project_dir=output_dir,
             kwargs_handlers=[ddp_kwargs, init_process_kwargs],
@@ -182,48 +250,59 @@ class Trainer(object):
         else:
             self.model_dtype = torch.float32
 
-        self.output_dir = output_dir
+        self.output_dir = os.path.join(output_dir, args.latent_model_path)
         self.num_dev = self.accelerator.num_processes
         args.num_devices = self.num_dev
+        self.args = args
 
         self.save_and_sample_every = args.save_and_sample_every
         self.train_bs = args.train_bs
         self.eval_bs = args.eval_bs
-        self.gradient_accumulate_every = gradient_accumulate_every
+        self.gradient_accumulate_every = args.grad_accumulate
         self.ema_update_every = args.ema_update_every
         self.eval_every = args.eval_every
 
-        # Load the arguments from the trained VAE model.
-        # This ensures we build the VAE with the same architecture it was trained with.
+        # generation args
+        self.gen_steps = args.gen_steps
+        self.gen_max_length = args.gen_max_length
+        self.num_gen_samples = args.num_gen_samples
+        self.gen_batch_size = args.gen_batch_size
+
+        self.log_dir = log_dir
+        self.use_precomputed_latents = args.use_precomputed_latents
+
         vae_args_path = os.path.join(args.latent_model_path, 'args.json')
-        if not os.path.exists(vae_args_path):
-            raise FileNotFoundError(f"VAE args.json not found at {vae_args_path}. Please ensure the latent_model_path is correct.")
         with open(vae_args_path, 'r') as f:
-            vae_args = json.load(f)
-        vae_args = Namespace(**vae_args)
-
-        # When using the VAE to generate latents on the fly for diffusion training,
-        # we must set this to False.
-        vae_args.use_precomputed_latents = False
-
-        # We also need to copy some arguments from the diffusion script args
-        # to the VAE args, like the backbone freezing strategy.
-        vae_args.freeze_bb = args.freeze_bb
-
-        # Instantiate the T5-based VAE and its tokenizer
-        self.ae, self.tokenizer, _ = get_latent_vae_tokenizer_t5(vae_args, torch.no_grad(), self.num_dev)
-
-        # Load the trained VAE weights
-        device = self.accelerator.device
-        self.ae.to(device)
-        data = torch.load(os.path.join(args.latent_model_path, 'model.pt'), map_location=device)
+            self.vae_args = json.load(f)
         
-        # We use `strict=False` because the saved VAE model was trained without the T5 encoder
-        # to save memory. The `get_latent_vae_tokenizer_t5` function has already loaded a
-        # pre-trained T5 encoder for us. This command loads the trained VAE and decoder weights
-        # from our saved file, while leaving the T5 encoder weights untouched.
-        self.ae.load_state_dict(data['model'], strict=False)
+        vae_args_ns = Namespace(**self.vae_args)
+        self.ae, self.tokenizer, _ = get_latent_vae_tokenizer_t5(vae_args_ns, torch.no_grad(), self.num_dev, create_encoder=True)
         
+        # Move the model to the correct device BEFORE loading the state dict
+        self.ae.to(self.accelerator.device)
+
+        # Load pre-trained weights if they exist
+        vae_checkpoint_path = os.path.join(args.latent_model_path, 'vae.pt')
+        if os.path.exists(vae_checkpoint_path):
+            print(f"Loading existing VAE weights from {vae_checkpoint_path}...")
+            
+            # Load the checkpoint directly to the accelerator's device to avoid slow CPU overhead
+            data = torch.load(vae_checkpoint_path, map_location="cpu", weights_only=False)
+            
+            # Handle both new (dictionary) and old (raw state_dict) formats
+            if 'model_state_dict' in data:
+                state_dict = data['model_state_dict']
+            else:
+                # Fallback for older checkpoints that were just the state_dict
+                state_dict = data
+            print("Loading state dict")
+            self.ae.load_state_dict(state_dict)
+            print("VAE weights loaded successfully.")
+            del data # Free memory
+            del state_dict
+
+        self.ae.eval()
+
         self.num_latents = self.ae.num_latents
         self.latent_dim = self.ae.latent_dim
         self.num_samples = args.num_samples 
@@ -231,8 +310,7 @@ class Trainer(object):
         for param in self.ae.parameters():
             param.requires_grad = False
 
-        self.ae.eval()
-
+        print("Starting Wandb")
         if self.accelerator.is_main_process:
             if args.output_dir is None:
                 args.output_dir = get_output_dir(args)
@@ -246,6 +324,7 @@ class Trainer(object):
             else:
                 self.accelerator.init_trackers(run, config=args, init_kwargs={"wandb": {"dir": results_folder}})
 
+        print("Creating ConditionalFlowMatcher")
         self.fm = ConditionalFlowMatcher()
 
         cfg_dit = DiTConfig()
@@ -257,19 +336,16 @@ class Trainer(object):
         cfg_dit.dev = self.accelerator.device
 
         self.v_predictor = DiTModel(cfg_dit)
-        # self.v_predictor.compile()
-
-        self.ema_decay = ema_decay
+        self.ema_decay = args.ema_decay
         self.ema_model = copy.deepcopy(self.v_predictor)
-        # self.ema_model.compile()
 
-        self.opt = get_adamw_optimizer(self.v_predictor.parameters(), lr=init_lr, betas=adam_betas,
-                                       weight_decay=adam_weight_decay)  # try to use muon?
+        self.opt = get_adamw_optimizer(self.v_predictor.parameters(), lr=args.init_lr, betas=(args.adam_beta1, args.adam_beta2),
+                                       weight_decay=args.adam_weight_decay)
 
         self.lr_scheduler = get_scheduler(
             args.lr_schedule,
             optimizer=self.opt,
-            num_warmup_steps=num_warmup_steps * self.num_dev,
+            num_warmup_steps=args.num_warmup_steps * self.num_dev,
             num_training_steps=args.train_num_steps * self.num_dev,
         )
 
@@ -277,24 +353,23 @@ class Trainer(object):
         dataset = get_dataset(args.dataset_name, shard_size=args.shard_size)
         self.dataset = dataset.shuffle(seed=412)
 
-        # The fineweb-edu dataset only has 'train' and 'valid' splits, so we remove 'test' logic.
         self.num_samples = min(self.num_samples, len(self.dataset['valid']))
         print(f'Using {self.num_samples} samples for evaluation')
 
         self.train_num_steps = args.train_num_steps
 
-        # Use the more capable LVAE T5 dataloader
+        vae_args = Namespace(**self.vae_args) # Re-create for dataloaders
         self.dataloader = get_dataloader_lvae_t5(
             args, self.dataset['train'], self.ae.config, self.tokenizer,
             vae_args.max_seq_len,
-            use_precomputed_latents=args.use_precomputed_latents,
+            use_precomputed_latents=self.use_precomputed_latents,
             precomputed_latent_path=args.precomputed_latent_path,
             batch_size=self.train_bs
         )
         self.val_dataloader = get_dataloader_lvae_t5(
             args, self.dataset['valid'], self.ae.config, self.tokenizer,
             vae_args.max_seq_len, shuffle=False,
-            use_precomputed_latents=args.use_precomputed_latents,
+            use_precomputed_latents=self.use_precomputed_latents,
             precomputed_latent_path=args.precomputed_latent_path,
             batch_size=self.eval_bs
         )
@@ -311,46 +386,61 @@ class Trainer(object):
         self.val_iter = cycle(self.val_dataloader)
 
         self.reference_dict = {}
-        self.use_precomputed_latents = args.use_precomputed_latents
 
         if self.accelerator.is_main_process:
             self.output_dir = Path(output_dir)
             self.output_dir.mkdir(exist_ok=True)
 
 
-    def save(self):
+    def save(self, milestone):
         if not self.accelerator.is_main_process:
             return
+
         data = {
             'step': self.step,
             'model': self.accelerator.get_state_dict(self.v_predictor),
             'ema_model': self.accelerator.get_state_dict(self.ema_model),
             'opt': self.opt.state_dict(),
             'scaler': self.accelerator.scaler.state_dict() if self.accelerator.scaler is not None else None,
-            'scheduler': self.lr_scheduler.state_dict()
+            'scheduler': self.lr_scheduler.state_dict(),
+            'version': __version__,
+            'args': self.args
         }
 
-        torch.save(data, str(self.output_dir / f'model.pt'))
+        model_save_path = os.path.join(self.output_dir, f'model-{milestone}.pt')
+        torch.save(data, model_save_path)
+
+        # Save the VAE model and its config to the same output directory
+        vae_save_path = os.path.join(self.output_dir, 'vae.pt')
+        torch.save(self.ae, vae_save_path)
+        
+        vae_args_save_path = os.path.join(self.output_dir, 'vae_args.json')
+        with open(vae_args_save_path, 'w') as f:
+            json.dump(self.vae_args, f, indent=2)
+
+        print(f'saved model to {model_save_path}, VAE to {vae_save_path}, and VAE args to {vae_args_save_path}')
 
     def load(self, file_path=None, best=False, init_only=False):
-        file_path = Path(file_path) if exists(file_path) else self.output_dir
-        accelerator = self.accelerator
-        device = accelerator.device
-
-        data = torch.load(str(file_path / f'model.pt'), map_location=device)
+        data = torch.load(file_path, map_location="cpu", weights_only=False)
 
         model = self.accelerator.unwrap_model(self.v_predictor)
         ema_model = self.accelerator.unwrap_model(self.ema_model)
         model.load_state_dict(data['model'])
 
-        self.opt.load_state_dict(data['opt'])
+          
+
+        # self.opt.load_state_dict(data['opt'])
         if self.accelerator.is_local_main_process:
             ema_model.load_state_dict(data['ema_model'])
 
+        # move model to cuda
+        model.to(self.accelerator.device)
+        ema_model.to(self.accelerator.device) 
+
         self.step = data['step']
 
-        if 'scheduler' in data:
-            self.lr_scheduler.load_state_dict(data['scheduler'])
+        # if 'scheduler' in data:
+            # self.lr_scheduler.load_state_dict(data['scheduler'])
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
@@ -377,13 +467,11 @@ class Trainer(object):
                             # actual latents for the diffusion model.
                             t5_embeddings = batch['input_latents']
                             with torch.no_grad():
-                                # Note: The attention mask is not available with precomputed latents.
-                                # The `latents_from_embeddings` method will create a dummy mask of all ones.
                                 latent = self.ae.latents_from_embeddings(t5_embeddings)
                         else:
+                            # When training from text, we run the text through the VAE to get the latents.
                             with torch.no_grad():
-                                latent = self.ae.get_latents(input_ids=batch['input_ids'],
-                                                             attn_mask=batch['attention_mask'])
+                                _, _, latent = self.ae.autoencode(input_ids=batch['input_ids'], attention_mask=batch.get('attention_mask'))
                         
                         # Cast latents to the diffusion model's dtype to prevent mismatch
                         latent = latent.to(dtype=self.model_dtype)
@@ -391,8 +479,7 @@ class Trainer(object):
                         x_0 = torch.randn_like(latent)
                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
 
-                        mask = None
-                        v_t = self.v_predictor(x_t, mask, t)
+                        v_t = self.v_predictor(x_t, t)
 
                         loss = F.mse_loss(v_t.float(), u_t.float())
                         
@@ -437,14 +524,23 @@ class Trainer(object):
                                 total_ema_val_loss = 0.
                                 
                                 val_iter = iter(self.val_dataloader)
+                                num_val_batches = 10  # Only evaluate on 10 batches
+                                
                                 with torch.no_grad():
-                                    for val_batch in val_iter:
+                                    for _ in range(num_val_batches):
+                                        try:
+                                            val_batch = next(val_iter)
+                                        except StopIteration:
+                                            break
+                                            
                                         val_batch = {k: v.to(device) for k, v in val_batch.items()}
                                         if self.use_precomputed_latents:
                                             t5_embeddings = val_batch['input_latents']
-                                            latent = self.ae.latents_from_embeddings(t5_embeddings)
+                                            with torch.no_grad():
+                                                latent = self.ae.latents_from_embeddings(t5_embeddings)
                                         else:
-                                            latent = self.ae.get_latents(input_ids=val_batch['input_ids'], attn_mask=val_batch['attention_mask'])
+                                            with torch.no_grad():
+                                                _, _, latent = self.ae.autoencode(input_ids=val_batch['input_ids'], attention_mask=val_batch.get('attention_mask'))
                                         
                                         # Cast latents to the diffusion model's dtype to prevent mismatch
                                         latent = latent.to(dtype=self.model_dtype)
@@ -452,14 +548,14 @@ class Trainer(object):
                                         x_0 = torch.randn_like(latent)
                                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
                                         
-                                        v_t = self.v_predictor(x_t, None, t)
+                                        v_t = self.v_predictor(x_t, t)
                                         total_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
 
-                                        v_t = self.ema_model(x_t, None, t)
+                                        v_t = self.ema_model(x_t, t)
                                         total_ema_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
 
-                                last_val_loss = total_val_loss / len(self.val_dataloader)
-                                last_ema_val_loss = total_ema_val_loss / len(self.val_dataloader)
+                                last_val_loss = total_val_loss / num_val_batches
+                                last_ema_val_loss = total_ema_val_loss / num_val_batches
                                 
                                 logs["val_loss"] = last_val_loss
                                 logs["val_ema_loss"] = last_ema_val_loss
@@ -479,6 +575,69 @@ class Trainer(object):
                         pbar.update(1)
 
                         if accelerator.is_main_process and self.step > 0 and self.step % self.save_and_sample_every == 0:
-                            self.save()
+                            self.save(self.step)
+                            self.eval(
+                                batch_size=self.eval_bs,
+                                gen_mult=self.gen_steps,
+                                max_gen_length=self.gen_max_length,
+                                num_samples=self.num_gen_samples,
+                            )
                 
-        self.save()
+
+    @torch.no_grad()
+    def eval(self,
+             batch_size: int = 1,
+             gen_mult: int = 1,
+             max_gen_length: int = 512,
+             num_samples: int = 1) -> None:
+        """
+        Evaluate the model by generating samples and calculating perplexity.
+        """
+        accelerator = self.accelerator
+        # It's best practice to use the EMA model for generation.
+        model_for_generation = self.accelerator.unwrap_model(self.ema_model)
+        model_for_generation.eval()
+        self.ae.eval()
+
+        generated_texts = []
+        pbar = tqdm(range(0, num_samples, batch_size), desc=f"Generating {num_samples} samples")
+
+        for i in pbar:
+            batch_size = min(batch_size, num_samples - i)
+            
+            # Generate latents using the diffusion model
+            latents = gen_samples(
+                model=model_for_generation,
+                num_latents=self.num_latents,
+                dim_latents=self.latent_dim,
+                batch_size=batch_size,
+                accelerator=self.accelerator,
+                steps=gen_mult,
+                target_dtype=self.model_dtype, # Pass the correct dtype for noise generation
+                method="euler"
+            )
+            # Decode the latents into text using the VAE
+            with torch.no_grad():
+                output_ids = self.ae.decode_latent(latents)
+            
+            decoded_batch = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+            generated_texts.extend(decoded_batch)
+
+            # Print samples as they are generated
+            for j, text in enumerate(decoded_batch):
+                print(f"\n--- Sample {i+j+1} ---")
+                print(text)
+                print("-" * (16 + len(str(i+j+1))) + "\n")
+
+            # Log to wandb in batches if enabled
+            if "wandb" in self.accelerator.log_with:
+                try:
+                    table = wandb.Table(columns=["step", "sample_id", "generated_text"])
+                    for j, text in enumerate(decoded_batch):
+                        table.add_data(self.step, i+j, text)
+                    self.accelerator.log({"generated_samples": table}, step=self.step)
+                except ImportError:
+                    print("wandb not installed, skipping logging of generated samples.")
+
+            pbar.set_description(f"Generated {len(generated_texts)} samples")
+        print("\nEvaluation finished.")
