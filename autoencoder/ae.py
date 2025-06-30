@@ -247,38 +247,35 @@ class PerceiverResampler(nn.Module):
 class VariationalAutoEncoder(nn.Module):
     def __init__(self, cfg_enc: Config, cfg_dec: Config, create_encoder: bool = True) -> None:
         super().__init__()
-        self.create_encoder = create_encoder
-
-        if self.create_encoder:
+        if create_encoder:
             self.encoder = PerceiverResampler(cfg_enc)
             self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
         else:
             self.encoder = None
             self.mu_lsigma = None
-            print("Skipping VAE encoder creation to save memory.")
 
-        print("Making decoder...")
         self.decoder = PerceiverResampler(cfg_dec)
-        print("Decoder made.")
 
     def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encodes the input and returns the mean and log-variance vectors."""
-        if not self.create_encoder:
-            raise NotImplementedError("Cannot call .encode() on a VAE that was initialized without an encoder (create_encoder=False).")
-        enc_output = self.encoder(x, mask)
+        if self.encoder is None:
+            raise ValueError("Cannot encode without an encoder. Model was initialized with create_encoder=False.")
         
+        enc_output = self.encoder(x, mask)
         mu, log_var = self.mu_lsigma(enc_output).chunk(2, dim=-1)
         
         return mu, log_var
 
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, only_mu: bool = False) -> torch.Tensor:
+        """Reparameterizes the latent space. If only_mu is True, returns the mean."""
+        if only_mu:
+            return mu
         std = torch.exp(0.5 * log_var)  
         eps = torch.randn_like(std)     
-        if only_mu:
-            return mu 
         return mu + eps * std           # compute the latent vector z
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        """Decodes latents back into the embedding space."""
         return self.decoder(latents)
 
     def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:

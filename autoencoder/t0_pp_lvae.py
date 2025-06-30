@@ -105,11 +105,8 @@ class LatentVAEModel(T5ForConditionalGeneration):
         t5_dim = model.config.d_model
         # The VAE's working dimension is now passed explicitly as `dim`.
         vae_model_dim = dim
-        
-        model.proj_down = nn.Linear(t5_dim, vae_model_dim)
-        
+                
         # The VAE configs are now created correctly.
-        # We remove `model_dim` from kwargs in case it was passed by mistake.
         kwargs.pop('model_dim', None)
         
         enc_cfg, dec_cfg = create_enc_dec_cfg(
@@ -122,9 +119,12 @@ class LatentVAEModel(T5ForConditionalGeneration):
         model.vae = VariationalAutoEncoder(
             cfg_enc=enc_cfg,
             cfg_dec=dec_cfg,
-            create_encoder=create_encoder
+            create_encoder=create_encoder,
         )
-        model.proj_up = nn.Linear(vae_model_dim, t5_dim)
+
+        # --- NEW: Attach projection layers directly to the vae module ---
+        model.vae.proj_down = nn.Linear(t5_dim, vae_model_dim)
+        model.vae.proj_up = nn.Linear(vae_model_dim, t5_dim)
 
         return model
 
@@ -146,7 +146,7 @@ class LatentVAEModel(T5ForConditionalGeneration):
         This is for the diffusion training pipeline with precomputed T5 embeddings.
         """
         embeddings = embeddings.to(self.dtype)
-        projected_embeddings = self.proj_down(embeddings)
+        projected_embeddings = self.vae.proj_down(embeddings)
         moments = self.vae.encode(projected_embeddings)
         return self.vae.reparameterize(*moments, only_mu=True)
 
@@ -154,20 +154,13 @@ class LatentVAEModel(T5ForConditionalGeneration):
     def decode_latent(self, latents, max_length=512, **kwargs):
         """
         Decodes latents from the diffusion model back into text.
-        1. Decodes the latents with the VAE's decoder.
-        2. Projects the VAE's output back up to the T5 embedding space.
-        3. Uses the T5 decoder (via the .generate() method) to generate token IDs.
         """
-        # 1. Decode the latents using the VAE's decoder.
+        # --- UPDATED: Use new proj_up path ---
         decoded_from_vae = self.vae.decode(latents)
+        projected_output = self.vae.proj_up(decoded_from_vae)
 
-        # 2. Project the VAE's output dimension back up to the T5's d_model.
-        projected_latents = self.proj_up(decoded_from_vae)
+        encoder_outputs = BaseModelOutput(last_hidden_state=projected_output)
 
-        # The generate method expects encoder_outputs to be a BaseModelOutput
-        encoder_outputs = BaseModelOutput(last_hidden_state=projected_latents)
-
-        # Use the T5's generate method for robust decoding
         gen_kwargs = {
             "max_length": max_length,
             "do_sample": True,
@@ -186,19 +179,19 @@ class LatentVAEModel(T5ForConditionalGeneration):
         t5_encoder_outputs = self.get_t5_encodings(input_ids, attn_mask=attention_mask)
         t5_embeddings = t5_encoder_outputs.last_hidden_state
 
-        # Project down to VAE dimension and run through VAE
-        projected_encodings = self.proj_down(t5_embeddings)
-        recon_encs, mu, log_var = self.vae(projected_encodings)
+        # --- UPDATED: Use new proj_down/proj_up path ---
+        projected_embeddings = self.vae.proj_down(t5_embeddings)
+        recon_embeddings, mu, log_var = self.vae(projected_embeddings)
         
-        # Calculate VAE loss
-        vae_loss_dict = self.vae.cont_loss_func(recon_encs, projected_encodings, mu, log_var)
+        # Calculate VAE loss in the projected space
+        vae_loss_dict = self.vae.cont_loss_func(recon_embeddings, projected_embeddings, mu, log_var)
         
         # Project back up to T5 dimension for the decoder
-        recon_embeddings = self.proj_up(recon_encs)
+        final_recon_embeddings = self.vae.proj_up(recon_embeddings)
         
         # Create a new encoder_outputs object for the T5 decoder
         final_encoder_outputs = BaseModelOutput(
-            last_hidden_state=recon_embeddings,
+            last_hidden_state=final_recon_embeddings,
             # Make sure to carry over other attributes if needed, e.g., attentions
             attentions=t5_encoder_outputs.attentions
         )
@@ -209,19 +202,19 @@ class LatentVAEModel(T5ForConditionalGeneration):
         """
         Takes pre-computed T5 latents, runs them through the VAE, and returns the VAE's output and loss.
         """
-        projected_latents = self.proj_down(precomputed_latents)
+        # --- UPDATED: Use new proj_down path ---
+        projected_latents = self.vae.proj_down(precomputed_latents)
         recon_latents, mu, log_var = self.vae(projected_latents)
+        # Loss is calculated in the projected space
         vae_loss_dict = self.vae.cont_loss_func(recon_latents, projected_latents, mu, log_var)
         return recon_latents, vae_loss_dict['kld_loss']
 
     def decode_loss(self, original_latents: torch.Tensor, vae_output: Any) -> torch.Tensor:
         """
         Computes the reconstruction loss between original T5 latents and the VAE's output.
-        Note: The loss is computed in the T5 embedding space.
+        The loss is now computed in the VAE's projected space.
         """
-        # The VAE output is projected back up to T5 dimension before loss calculation
-        reconstructed_t5_latents = self.proj_up(vae_output)
-        return F.mse_loss(reconstructed_t5_latents, original_latents)
+        return F.mse_loss(vae_output, self.vae.proj_down(original_latents))
 
     def forward(
         self,
@@ -247,11 +240,19 @@ class LatentVAEModel(T5ForConditionalGeneration):
             if not self.use_precomputed_latents:
                 raise ValueError("`input_latents` was provided, but the model was not initialized with `use_precomputed_latents=True`.")
             
-            recon_latents, kld_loss = self.encode(input_latents)
-            recon_loss = self.decode_loss(input_latents, recon_latents)
-            # For generation, we need to wrap the reconstructed latents in a BaseModelOutput
-            projected_up_recon = self.proj_up(recon_latents)
-            enc_outs = BaseModelOutput(last_hidden_state=projected_up_recon)
+            # --- UPDATED: Use new projection paths and loss calculation ---
+            projected_embeddings = self.vae.proj_down(input_latents)
+            recon_embeddings, mu, log_var = self.vae(projected_embeddings)
+
+            # Calculate VAE loss in the projected space
+            vae_loss_dict = self.vae.cont_loss_func(recon_embeddings, projected_embeddings, mu, log_var)
+            recon_loss = vae_loss_dict['reconstruction_loss']
+            kld_loss = vae_loss_dict['kld_loss']
+            
+            # For generation, project back up and wrap in BaseModelOutput
+            reconstructed_t5_embeddings = self.vae.proj_up(recon_embeddings)
+            enc_outs = BaseModelOutput(last_hidden_state=reconstructed_t5_embeddings)
+            
             return {
                 'reconstruction_loss': recon_loss,
                 'kld_loss': kld_loss,
@@ -321,30 +322,35 @@ def get_latent_vae_tokenizer_t5(
         num_latents=args.num_latents,
         # Control flow parameters
         use_precomputed_latents=getattr(args, 'use_precomputed_latents', False),
-        create_encoder=create_encoder,
+        create_encoder=getattr(args, 'create_encoder', True),
         # Pass the rest of the VAE config
         **vae_params
     )
 
-    if create_encoder:
-        print("T5 encoder is present.")
-    else:
-        # For pre-computed latent training, we don't need the T5 encoder.
-        # Deleting it saves a significant amount of memory.
-        del model.encoder
-        model.encoder = None # Set to None for clarity
-        print("T5 encoder has been deleted to save memory.")
+    # if create_encoder:
+    #     print("T5 encoder is present.")
+    # else:
+    #     # For pre-computed latent training, we don't need the T5 encoder.
+    #     # Deleting it saves a significant amount of memory.
+    #     del model.encoder
+    #     model.encoder = None # Set to None for clarity
+    #     print("T5 encoder has been deleted to save memory.")
 
-    model.num_dev = num_dev
-    if num_dev > 1:
-        model.freeze = torch.nn.parallel.DistributedDataParallel(
-            nn.Module(),
-            device_ids=[torch.cuda.current_device()]
-        ).module.requires_grad_(False)
-    else:
-        model.freeze = nn.Module().requires_grad_(False)
+
+    cfg = t5_model.config
+    del t5_model
+    if args.freeze_bb == 'ft':
+        for (param_name, param) in model.named_parameters():
+            param.requires_grad = True
+    elif args.freeze_bb == 'freeze':
+        for (param_name, param) in model.named_parameters():
+            if re.fullmatch(".*vae.*", param_name):
+                param.requires_grad = True
+                # print(f"Trainable: {param_name}")
+            else:
+                param.requires_grad = False
         
-    return model, tokenizer, t5_model.config
+    return model, tokenizer, cfg
 
 
 if __name__ == "__main__": 

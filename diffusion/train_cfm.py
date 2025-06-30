@@ -287,19 +287,27 @@ class Trainer(object):
             print(f"Loading existing VAE weights from {vae_checkpoint_path}...")
             
             # Load the checkpoint directly to the accelerator's device to avoid slow CPU overhead
-            data = torch.load(vae_checkpoint_path, map_location="cpu", weights_only=False)
+            data = torch.load(vae_checkpoint_path, map_location=self.accelerator.device)
             
-            # Handle both new (dictionary) and old (raw state_dict) formats
-            if 'model_state_dict' in data:
+            # Handle different checkpoint formats
+            if 'vae_state_dict' in data:
+                # New format: only VAE components
+                vae_components = data['vae_state_dict']
+                self.ae.vae.load_state_dict(vae_components['vae'])
+                self.ae.proj_down.load_state_dict(vae_components['proj_down'])
+                self.ae.proj_up.load_state_dict(vae_components['proj_up'])
+                print("Loaded VAE components from new checkpoint format.")
+            elif 'model_state_dict' in data:
+                # Old format: full model state dict
                 state_dict = data['model_state_dict']
+                self.ae.load_state_dict(state_dict)
+                print("Loaded full model from old checkpoint format.")
             else:
-                # Fallback for older checkpoints that were just the state_dict
-                state_dict = data
-            print("Loading state dict")
-            self.ae.load_state_dict(state_dict)
-            print("VAE weights loaded successfully.")
+                # Very old format: raw state dict
+                self.ae.load_state_dict(data)
+                print("Loaded VAE from older checkpoint format.")
+            
             del data # Free memory
-            del state_dict
 
         self.ae.eval()
 
@@ -578,7 +586,7 @@ class Trainer(object):
                             self.save(self.step)
                             self.eval(
                                 batch_size=self.eval_bs,
-                                gen_mult=self.gen_steps,
+                                sampling_steps=self.gen_steps,
                                 max_gen_length=self.gen_max_length,
                                 num_samples=self.num_gen_samples,
                             )
@@ -586,10 +594,11 @@ class Trainer(object):
 
     @torch.no_grad()
     def eval(self,
+             model_path: str = None,
              batch_size: int = 1,
-             gen_mult: int = 1,
-             max_gen_length: int = 512,
-             num_samples: int = 1) -> None:
+             sampling_steps: int = 100,
+             max_gen_length: int = 64,
+             num_samples: int = 50000) -> None:
         """
         Evaluate the model by generating samples and calculating perplexity.
         """
@@ -612,13 +621,13 @@ class Trainer(object):
                 dim_latents=self.latent_dim,
                 batch_size=batch_size,
                 accelerator=self.accelerator,
-                steps=gen_mult,
+                steps=sampling_steps,
                 target_dtype=self.model_dtype, # Pass the correct dtype for noise generation
                 method="euler"
             )
             # Decode the latents into text using the VAE
             with torch.no_grad():
-                output_ids = self.ae.decode_latent(latents)
+                output_ids = self.ae.decode_latent(latents, max_length=max_gen_length)
             
             decoded_batch = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
             generated_texts.extend(decoded_batch)

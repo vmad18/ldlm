@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F 
 
-from einops import rearrange
+from einops import rearrange, repeat
 from math import sqrt, log
 
 from typing import Tuple, Optional
@@ -239,6 +239,8 @@ class DiTModel(nn.Module):
 
         self.t_embed = TimestepEmbedder(cfg)
         
+        self.null_context = nn.Parameter(torch.randn(1, cfg.num_latents, cfg.latent_dim))
+        
         self.blocks = nn.ModuleList([DiTBlock(cfg) for _ in range(cfg.num_layers)])
         
         self.norm_out = nn.LayerNorm(cfg.dim, elementwise_affine=False)
@@ -248,9 +250,8 @@ class DiTModel(nn.Module):
 
     # t: torch.Tensor, ctx: torch.Tensor
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        t = t.squeeze(1)
-        t = t.squeeze(1)
-        ctx = torch.zeros_like(x)
+        t = t.view(-1) 
+        ctx = repeat(self.null_context, '1 n d -> b n d', b=x.shape[0])
         
         x = self.input_proj(x)
         ctx = self.ctx_proj(ctx)

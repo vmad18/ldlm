@@ -251,16 +251,24 @@ class Trainer(object):
         if not self.accelerator.is_main_process:
             return
 
-        model_path = os.path.join(self.args.save_dir, 'vae.pt')
+        model_path = os.path.join(self.args.output_dir, 'vae.pt')
         
-        # We need to save the args along with the model state
+        # Only save the VAE components, not the pretrained T5 backbone
+        model = self.accelerator.unwrap_model(self.model)
+        vae_state_dict = {
+            'vae': model.vae.state_dict(),
+            'latent_dim': model.latent_dim,
+            'num_latents': model.num_latents,
+            'use_precomputed_latents': model.use_precomputed_latents
+        }
+        
         data = {
             'args': self.args,
-            'model_state_dict': self.accelerator.get_state_dict(self.model)
+            'vae_state_dict': vae_state_dict
         }
 
         torch.save(data, model_path)
-        print(f'Saved VAE model and args to {model_path}')
+        print(f'Saved VAE components and args to {model_path}')
 
     @torch.no_grad()
     def sample_from_prior(self):
@@ -315,15 +323,22 @@ class Trainer(object):
 
         data = torch.load(model_path, map_location='cpu')
 
-        # Handle both old and new checkpoint formats
-        if 'model_state_dict' in data:
+        # Handle both new (VAE components only) and old (full model) checkpoint formats
+        if 'vae_state_dict' in data:
+            # New format: only VAE components
+            vae_components = data['vae_state_dict']
+            model = self.accelerator.unwrap_model(self.model)
+            model.vae.load_state_dict(vae_components['vae'])
+            print("Loaded VAE components from new checkpoint format.")
+        elif 'model_state_dict' in data:
+            # Old format: full model state dict
             model_state_dict = data['model_state_dict']
+            self.model.load_state_dict(model_state_dict)
+            print("Loaded full model from old checkpoint format.")
         else:
-            # Old format: the file is the state dict itself
+            # Very old format: the file is the state dict itself
             print("Loading VAE from an older checkpoint format.")
-            model_state_dict = data
-
-        self.model.load_state_dict(model_state_dict)
+            self.model.load_state_dict(data)
 
         if resume_training:
             # If we need to resume optimizer state, etc., it would be loaded here.
@@ -453,6 +468,7 @@ class Trainer(object):
                 if self.accelerator.is_main_process:
                     if self.step % self.eval_every == 0:
                         self.validation()
+                        self.save()
                     
                     if self.sample_every > 0 and self.step > 0 and self.step % self.sample_every == 0:
                         self.sample_from_prior()
@@ -464,9 +480,6 @@ class Trainer(object):
                     if self.accelerator.sync_gradients:
                         log_data['train/grad_norm'] = grad_norm
                     self.accelerator.log(log_data, step=self.step)
-                    
-                    if self.step % 1000 == 0:
-                        self.save()
 
         self.accelerator.print('Training complete')
         self.save()
