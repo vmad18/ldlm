@@ -1,0 +1,24 @@
+# This file defines a custom launcher named 'my_cluster'.
+# It inherits the base configuration from the 'submitit_slurm' launcher
+# and overrides it with settings specific to your SLURM environment.
+defaults:
+  - submitit_slurm
+
+# Explicitly set the target class for the launcher
+_target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
+
+# Your cluster-specific SLURM parameters
+timeout_min: 1440
+nodes: 1
+tasks_per_node: 1
+cpus_per_task: 24
+mem_gb: 64
+gres: "gpu:1" # Using gres directly as in the example
+constraint: "gpu80"
+name: ${hydra.job.name}
+# Disable requeueing on preemption or timeout
+max_num_timeout: 0
+setup:
+  - "module purge"
+  - "module load anaconda3/2024.10"
+  - "source /scratch/gpfs/ashwinee/new/activate.sh" 

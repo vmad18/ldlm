@@ -1,0 +1,32 @@
+seed: 412
+wandb_name: scratch_latent_vae
+resume_training: false
+resume_dir: null
+eval: false
+save_dir: saved_latent_models
+data:
+  dataset_name: fineweb-edu_10b
+  num_samples: null
+model:
+  max_seq_len: 512
+  d_model: 768
+  latent_dim: 1536
+  num_latents: 64
+  dim_head: 128
+  num_layers: 8
+training:
+  train_bs: 16
+  eval_bs: 8
+  train_num_steps: 10000
+  eval_every: 1000
+  grad_accumulate: 16
+  mixed_precision: bf16
+  kld_weight: 1.0e-05
+  optimizer:
+    learning_rate: 0.0005
+    lr_schedule: linear
+    lr_warmup_steps: 500
+    adam_betas:
+    - 0.9
+    - 0.99
+    adam_weight_decay: 0.01
