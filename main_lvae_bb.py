@@ -19,9 +19,9 @@ def main():
     parser.add_argument("--train_bs", type=int, default=32) # 196
     parser.add_argument("--eval_bs", type=int, default=16)
     
-    parser.add_argument("--d_model", type=int, default=1024)
-    parser.add_argument("--latent_dim", type=int, default=2048)
-    parser.add_argument("--num_latents", type=int, default=32)
+    parser.add_argument("--d_model", type=int, default=512)
+    parser.add_argument("--latent_dim", type=int, default=1024)
+    parser.add_argument("--num_latents", type=int, default=128)
     parser.add_argument("--sample_every", type=int, default=50)
     parser.add_argument("--num_samples_to_gen", type=int, default=1)
     parser.add_argument("--kld_weight", type=float, default=1e-5)
@@ -78,6 +78,7 @@ def main():
     parser.add_argument("--precomputed_latent_path", type=str, default="precomputed_latents/bigscience__T0pp_latents", help="Path to the directory of pre-computed latent .npy files.")
 
     args = parser.parse_args()
+    print(args)
 
     trainer = Trainer(args)
 

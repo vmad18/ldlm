@@ -5,3 +5,8 @@ tokenized_ds/
 precomputed_latents/
 results/
 diff_results/
+multirun/
+outputs/
+wandb/
+Report/
+*.sh

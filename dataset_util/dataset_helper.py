@@ -286,7 +286,7 @@ def get_dataloader(args, dataset, model_config, tokenizer, max_seq_len, mode='di
     return dl
 
 
-def get_dataloader_lvae(args,
+def get_dataloader_lvae(cfg,
                         dataset, 
                         tokenizer, 
                         max_seq_len, 
@@ -302,14 +302,14 @@ def get_dataloader_lvae(args,
 
     # Create a unique path for the tokenized dataset to avoid vocab mismatch.
     sanitized_tokenizer_name = tokenizer.name_or_path.replace("/", "__")
-    processed_data_path = f"tokenized_ds/{args.dataset_name}/{sanitized_tokenizer_name}_seqlen{max_seq_len}"
+    processed_data_path = f"tokenized_ds/{cfg.data.dataset_name}/{sanitized_tokenizer_name}_seqlen{max_seq_len}"
 
     if os.path.exists(processed_data_path):
         print(f"Loading tokenized dataset from disk: {processed_data_path}")
         tokenized_dataset = load_from_disk(processed_data_path)
     else:
         print("Tokenizing dataset...")        
-        num_cores = max(os.cpu_count() // 4, 2) 
+        num_cores = os.cpu_count()
         tokenized_dataset = dataset.map(
             tokenization,
             batched=True,
@@ -320,13 +320,14 @@ def get_dataloader_lvae(args,
         print(f"Saving tokenized dataset to disk: {processed_data_path}")
         tokenized_dataset.save_to_disk(processed_data_path)
     
+    batch_size = cfg.training.train_bs if shuffle else cfg.training.eval_bs
     dl = DataLoader(
             tokenized_dataset,
             collate_fn = collate_fn,
-            batch_size = args.train_bs,
+            batch_size = batch_size,
             shuffle = shuffle,
             pin_memory = True,
-            num_workers = max(os.cpu_count() // 2, 4)
+            num_workers = os.cpu_count()
         )
     return dl
 

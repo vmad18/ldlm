@@ -99,7 +99,8 @@ class LatentVAEModel(nn.Module):
 
     # decode diffused latent 
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
-        return self.vae.decode(latent)
+        decoded_embeds = self.vae.decode(latent)
+        return self.dembed_head(decoded_embeds)
 
     def autoencode(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
         *_, s = input_ids.shape 
@@ -127,7 +128,7 @@ class LatentVAEModel(nn.Module):
             block.compile(**compile_kwargs)
 
 
-def get_latent_vae_tokenizer(args, tokenizer_name: str = "meta-llama/Llama-3.2-1B") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
+def get_latent_vae_tokenizer(model_cfg, tokenizer_name: str = "meta-llama/Llama-3.2-1B") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     
     if tokenizer.pad_token is None:
@@ -135,12 +136,12 @@ def get_latent_vae_tokenizer(args, tokenizer_name: str = "meta-llama/Llama-3.2-1
     
     vae = LatentVAEModel(
         vocab_size = len(tokenizer),
-        d_model = args.d_model, 
-        latent_dim = args.latent_dim, 
-        num_latents = args.num_latents, 
-        dim_head = args.dim_head, 
-        max_tokens = args.max_seq_len, 
-        layers_p = args.num_layers) 
+        d_model = model_cfg.d_model, 
+        latent_dim = model_cfg.latent_dim, 
+        num_latents = model_cfg.num_latents, 
+        dim_head = model_cfg.dim_head, 
+        max_tokens = model_cfg.max_seq_len, 
+        layers_p = model_cfg.num_layers) 
     
     return vae, tokenizer 
 

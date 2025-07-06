@@ -19,9 +19,12 @@ from transformers import get_scheduler, AutoTokenizer, PreTrainedTokenizerBase, 
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
-from ldlm.diffusion.cond_flow_matcher import ConditionalFlowMatcher
-from ldlm.autoencoder.t0_pp_lvae import get_latent_vae_tokenizer_t5
-from ldlm.diffusion.neural_diffusion import DiTModel, DiTConfig
+from autoencoder.latent_vae import get_latent_vae_tokenizer
+from dataset_util.dataset_helper import get_dataset, get_dataloader_lvae
+from omegaconf import DictConfig, OmegaConf
+
+from diffusion.cond_flow_matcher import ConditionalFlowMatcher
+from diffusion.neural_diffusion import DiTModel, DiTConfig
 
 from accelerate import Accelerator, DistributedDataParallelKwargs, InitProcessGroupKwargs
 import wandb
@@ -37,8 +40,6 @@ from pathlib import Path
 from datetime import datetime
 import json
 import random
-
-from ldlm.dataset_util.dataset_helper import get_dataset, get_dataloader_lvae_t5
 
 __version__ = "0.0.1"
 
@@ -118,6 +119,8 @@ def gen_samples(
 def compute_grad_norm(parameters):
     # implementation adapted from https://pytorch.org/docs/stable/_modules/torch/nn/utils/clip_grad.html#clip_grad_norm_
     parameters = [p for p in parameters if p.grad is not None]
+    if len(parameters) == 0:
+        return 0.0
     total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), p=2) for p in parameters]), p=2).item()
     return total_norm
 
@@ -224,20 +227,17 @@ class Trainer(object):
         return trainer
 
     def __init__(self,
-                 args: Namespace,
-                 mixed_precision="no",
-                 report_with: str = "wandb",
-                 output_dir: str = "./results",
-                 log_dir: str = './logs/',
+                 cfg: DictConfig,
+                 output_dir: str = "./results"
                  ) -> None:
         # This __init__ method is now EXCLUSIVELY for training.
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         init_process_kwargs = InitProcessGroupKwargs(timeout=timedelta(minutes=90))
 
         self.accelerator = Accelerator(
-            mixed_precision=mixed_precision,
-            gradient_accumulation_steps=args.grad_accumulate,
-            log_with=report_with,
+            mixed_precision=cfg.training.mixed_precision,
+            gradient_accumulation_steps=cfg.training.grad_accumulate,
+            log_with="wandb",
             project_dir=output_dir,
             kwargs_handlers=[ddp_kwargs, init_process_kwargs],
         )
@@ -250,136 +250,115 @@ class Trainer(object):
         else:
             self.model_dtype = torch.float32
 
-        self.output_dir = os.path.join(output_dir, args.latent_model_path)
+        self.output_dir = Path(output_dir)
         self.num_dev = self.accelerator.num_processes
-        args.num_devices = self.num_dev
-        self.args = args
+        self.cfg = cfg
 
-        self.save_and_sample_every = args.save_and_sample_every
-        self.train_bs = args.train_bs
-        self.eval_bs = args.eval_bs
-        self.gradient_accumulate_every = args.grad_accumulate
-        self.ema_update_every = args.ema_update_every
-        self.eval_every = args.eval_every
+        self.save_and_sample_every = cfg.training.save_and_sample_every
+        self.train_bs = cfg.training.train_bs
+        self.eval_bs = cfg.training.eval_bs
+        self.gradient_accumulate_every = cfg.training.grad_accumulate
+        self.ema_update_every = cfg.training.ema_update_every
+        self.eval_every = cfg.training.eval_every
 
-        # generation args
-        self.gen_steps = args.gen_steps
-        self.gen_max_length = args.gen_max_length
-        self.num_gen_samples = args.num_gen_samples
-        self.gen_batch_size = args.gen_batch_size
-
-        self.log_dir = log_dir
-        self.use_precomputed_latents = args.use_precomputed_latents
-
-        vae_args_path = os.path.join(args.latent_model_path, 'args.json')
-        with open(vae_args_path, 'r') as f:
-            self.vae_args = json.load(f)
+        # generation args from eval config
+        self.gen_steps = cfg.eval.gen_steps
+        self.gen_max_length = cfg.eval.gen_max_length
+        self.num_gen_samples = cfg.eval.num_gen_samples
+        self.gen_batch_size = cfg.eval.gen_batch_size
         
-        vae_args_ns = Namespace(**self.vae_args)
-        self.ae, self.tokenizer, _ = get_latent_vae_tokenizer_t5(vae_args_ns, torch.no_grad(), self.num_dev, create_encoder=True)
+        print(f"Loading VAE from path: {cfg.model.latent_model_path}")
+        vae_config_path = os.path.join(cfg.model.latent_model_path, 'config.yaml')
+        if not os.path.exists(vae_config_path):
+            raise FileNotFoundError(f"VAE config not found at {vae_config_path}")
         
-        # Move the model to the correct device BEFORE loading the state dict
+        loaded_vae_cfg = OmegaConf.load(vae_config_path)
+
+        # Instantiate VAE and its corresponding tokenizer from the saved config
+        self.ae, self.tokenizer = get_latent_vae_tokenizer(loaded_vae_cfg.model)
+        print(f"Loaded VAE and its tokenizer ({self.tokenizer.name_or_path}).")
+        
+        # Move model to device before loading state_dict
         self.ae.to(self.accelerator.device)
 
-        # Load pre-trained weights if they exist
-        vae_checkpoint_path = os.path.join(args.latent_model_path, 'vae.pt')
-        if os.path.exists(vae_checkpoint_path):
-            print(f"Loading existing VAE weights from {vae_checkpoint_path}...")
-            
-            # Load the checkpoint directly to the accelerator's device to avoid slow CPU overhead
-            data = torch.load(vae_checkpoint_path, map_location=self.accelerator.device)
-            
-            # Handle different checkpoint formats
-            if 'vae_state_dict' in data:
-                # New format: only VAE components
-                vae_components = data['vae_state_dict']
-                self.ae.vae.load_state_dict(vae_components['vae'])
-                self.ae.proj_down.load_state_dict(vae_components['proj_down'])
-                self.ae.proj_up.load_state_dict(vae_components['proj_up'])
-                print("Loaded VAE components from new checkpoint format.")
-            elif 'model_state_dict' in data:
-                # Old format: full model state dict
-                state_dict = data['model_state_dict']
-                self.ae.load_state_dict(state_dict)
-                print("Loaded full model from old checkpoint format.")
-            else:
-                # Very old format: raw state dict
-                self.ae.load_state_dict(data)
-                print("Loaded VAE from older checkpoint format.")
-            
-            del data # Free memory
+        vae_checkpoint_path = os.path.join(cfg.model.latent_model_path, 'model_best.pt')
+        if not os.path.exists(vae_checkpoint_path):
+            raise FileNotFoundError(f"VAE checkpoint 'model_best.pt' not found in {cfg.model.latent_model_path}")
 
-        self.ae.eval()
-
-        self.num_latents = self.ae.num_latents
-        self.latent_dim = self.ae.latent_dim
-        self.num_samples = args.num_samples 
+        print(f"Loading VAE checkpoint from: {vae_checkpoint_path}")
+        vae_data = torch.load(vae_checkpoint_path, map_location=self.accelerator.device, weights_only=False)
         
+        if 'model' in vae_data:
+            self.ae.load_state_dict(vae_data['model'])
+            print("Successfully loaded VAE model weights.")
+        else:
+            self.ae.load_state_dict(vae_data)
+            print("Loaded VAE weights from raw state_dict.")
+
+        del vae_data
+        
+        self.ae.eval()
         for param in self.ae.parameters():
             param.requires_grad = False
 
-        print("Starting Wandb")
+        self.num_latents = self.ae.num_latents
+        self.latent_dim = self.ae.latent_dim
+        
         if self.accelerator.is_main_process:
-            if args.output_dir is None:
-                args.output_dir = get_output_dir(args)
-                with open(os.path.join(args.output_dir, 'args.json'), 'w') as f:
-                    json.dump(args.__dict__, f, indent=2)
-            results_folder = args.output_dir
-            run = os.path.split(__file__)[-1].split(".")[0]
-            if args.wandb_name:
-                self.accelerator.init_trackers(run, config=args,
-                                               init_kwargs={"wandb": {"dir": results_folder, "name": args.wandb_name}})
-            else:
-                self.accelerator.init_trackers(run, config=args, init_kwargs={"wandb": {"dir": results_folder}})
+            run_name = cfg.general.wandb_name or "cfm_diffusion_model"
+            self.accelerator.init_trackers(
+                project_name="ldlm_diffusion",
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": {"name": run_name}}
+            )
 
         print("Creating ConditionalFlowMatcher")
         self.fm = ConditionalFlowMatcher()
 
         cfg_dit = DiTConfig()
-        cfg_dit.dim = args.model_dim
-        cfg_dit.num_latents = self.ae.num_latents
-        print(f"Setting cfg_dit.latent_dim: {self.latent_dim}")
+        cfg_dit.dim = cfg.model.dim
+        cfg_dit.num_latents = self.num_latents
         cfg_dit.latent_dim = self.latent_dim
-        cfg_dit.num_layers = args.num_layers
+        cfg_dit.num_layers = cfg.model.num_layers
+        cfg_dit.expansion_factor = cfg.model.expansion_factor
         cfg_dit.dev = self.accelerator.device
 
         self.v_predictor = DiTModel(cfg_dit)
-        self.ema_decay = args.ema_decay
+        self.ema_decay = cfg.training.ema_decay
         self.ema_model = copy.deepcopy(self.v_predictor)
 
-        self.opt = get_adamw_optimizer(self.v_predictor.parameters(), lr=args.init_lr, betas=(args.adam_beta1, args.adam_beta2),
-                                       weight_decay=args.adam_weight_decay)
+        self.opt = get_adamw_optimizer(
+            self.v_predictor.parameters(),
+            lr=cfg.training.optimizer.learning_rate,
+            betas=cfg.training.optimizer.adam_betas,
+            weight_decay=cfg.training.optimizer.adam_weight_decay
+        )
 
         self.lr_scheduler = get_scheduler(
-            args.lr_schedule,
+            cfg.training.optimizer.lr_schedule,
             optimizer=self.opt,
-            num_warmup_steps=args.num_warmup_steps * self.num_dev,
-            num_training_steps=args.train_num_steps * self.num_dev,
+            num_warmup_steps=cfg.training.optimizer.lr_warmup_steps * self.num_dev,
+            num_training_steps=cfg.training.train_num_steps * self.num_dev,
         )
 
-        self.dataset_name = args.dataset_name
-        dataset = get_dataset(args.dataset_name, shard_size=args.shard_size)
-        self.dataset = dataset.shuffle(seed=412)
+        dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.shard_size)
+        self.dataset = dataset.shuffle(seed=cfg.general.seed)
 
-        self.num_samples = min(self.num_samples, len(self.dataset['valid']))
-        print(f'Using {self.num_samples} samples for evaluation')
+        self.num_samples_eval = len(self.dataset['valid'])
 
-        self.train_num_steps = args.train_num_steps
+        self.train_num_steps = cfg.training.train_num_steps
 
-        vae_args = Namespace(**self.vae_args) # Re-create for dataloaders
-        self.dataloader = get_dataloader_lvae_t5(
-            args, self.dataset['train'], self.ae.config, self.tokenizer,
-            vae_args.max_seq_len,
-            use_precomputed_latents=self.use_precomputed_latents,
-            precomputed_latent_path=args.precomputed_latent_path,
-            batch_size=self.train_bs
+        # Use the loaded VAE config for the dataloader
+        loaded_vae_cfg.training.train_bs = cfg.training.train_bs
+        self.dataloader = get_dataloader_lvae(
+            loaded_vae_cfg, self.dataset['train'], self.tokenizer,
+            loaded_vae_cfg.model.max_seq_len
         )
-        self.val_dataloader = get_dataloader_lvae_t5(
-            args, self.dataset['valid'], self.ae.config, self.tokenizer,
-            vae_args.max_seq_len, shuffle=False,
-            use_precomputed_latents=self.use_precomputed_latents,
-            precomputed_latent_path=args.precomputed_latent_path,
-            batch_size=self.eval_bs
+        
+        loaded_vae_cfg.training.eval_bs = cfg.training.eval_bs
+        self.val_dataloader = get_dataloader_lvae(
+            loaded_vae_cfg, self.dataset['valid'], self.tokenizer,
+            loaded_vae_cfg.model.max_seq_len, shuffle=False
         )
 
         self.step = 0
@@ -388,19 +367,13 @@ class Trainer(object):
             self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader)
 
         model_size = sum(p.numel() for p in self.v_predictor.parameters())
-        self.accelerator.print(f"Model params: {model_size / 1024 / 1024:.2f} M")
+        self.accelerator.print(f"Model params: {model_size / 1e6:.2f} M")
 
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
+        self.best_val_loss = float('inf')
 
-        self.reference_dict = {}
-
-        if self.accelerator.is_main_process:
-            self.output_dir = Path(output_dir)
-            self.output_dir.mkdir(exist_ok=True)
-
-
-    def save(self, milestone):
+    def save(self, file_name='model.pt'):
         if not self.accelerator.is_main_process:
             return
 
@@ -412,43 +385,35 @@ class Trainer(object):
             'scaler': self.accelerator.scaler.state_dict() if self.accelerator.scaler is not None else None,
             'scheduler': self.lr_scheduler.state_dict(),
             'version': __version__,
-            'args': self.args
+            'cfg': OmegaConf.to_container(self.cfg, resolve=True),
+            'best_val_loss': self.best_val_loss
         }
 
-        model_save_path = os.path.join(self.output_dir, f'model-{milestone}.pt')
+        model_save_path = self.output_dir / file_name
         torch.save(data, model_save_path)
 
-        # Save the VAE model and its config to the same output directory
-        vae_save_path = os.path.join(self.output_dir, 'vae.pt')
-        torch.save(self.ae, vae_save_path)
-        
-        vae_args_save_path = os.path.join(self.output_dir, 'vae_args.json')
-        with open(vae_args_save_path, 'w') as f:
-            json.dump(self.vae_args, f, indent=2)
+        # We don't need to re-save the VAE, it's already in its own directory
+        print(f'Saved diffusion model checkpoint to {model_save_path}')
 
-        print(f'saved model to {model_save_path}, VAE to {vae_save_path}, and VAE args to {vae_args_save_path}')
-
-    def load(self, file_path=None, best=False, init_only=False):
+    def load(self, file_path):
         data = torch.load(file_path, map_location="cpu", weights_only=False)
 
         model = self.accelerator.unwrap_model(self.v_predictor)
         ema_model = self.accelerator.unwrap_model(self.ema_model)
         model.load_state_dict(data['model'])
-
-          
-
-        # self.opt.load_state_dict(data['opt'])
+        
         if self.accelerator.is_local_main_process:
             ema_model.load_state_dict(data['ema_model'])
 
-        # move model to cuda
         model.to(self.accelerator.device)
         ema_model.to(self.accelerator.device) 
 
         self.step = data['step']
-
-        # if 'scheduler' in data:
-            # self.lr_scheduler.load_state_dict(data['scheduler'])
+        if 'best_val_loss' in data:
+            self.best_val_loss = data['best_val_loss']
+        # You might want to resume optimizer and scheduler state as well
+        # self.opt.load_state_dict(data['opt'])
+        # self.lr_scheduler.load_state_dict(data['scheduler'])
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
@@ -456,197 +421,145 @@ class Trainer(object):
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
-        last_val_loss = float('nan') # Use Not a Number as a placeholder
+        last_val_loss = float('nan')
         last_ema_val_loss = float('nan')
     
         with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
-
             while self.step < self.train_num_steps:
                 total_loss = 0.
                 
-                # Using the dataloader directly is cleaner
-                for batch in self.dataloader:
+                for _ in range(self.gradient_accumulate_every):
+                    batch = next(self.data_iter)
                     batch = {k: v.to(device) for k, v in batch.items()}
 
                     with accelerator.accumulate(self.v_predictor):
-                        if self.use_precomputed_latents:
-                            # The precomputed 'latents' are actually T5 embeddings.
-                            # We need to pass them through the VAE's encoder to get the
-                            # actual latents for the diffusion model.
-                            t5_embeddings = batch['input_latents']
-                            with torch.no_grad():
-                                latent = self.ae.latents_from_embeddings(t5_embeddings)
-                        else:
-                            # When training from text, we run the text through the VAE to get the latents.
-                            with torch.no_grad():
-                                _, _, latent = self.ae.autoencode(input_ids=batch['input_ids'], attention_mask=batch.get('attention_mask'))
+                        with torch.no_grad():
+                            latent = self.ae.get_latents(input_ids=batch['input_ids'], attn_mask=batch.get('attention_mask'))
                         
-                        # Cast latents to the diffusion model's dtype to prevent mismatch
                         latent = latent.to(dtype=self.model_dtype)
 
                         x_0 = torch.randn_like(latent)
                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
-
                         v_t = self.v_predictor(x_t, t)
-
                         loss = F.mse_loss(v_t.float(), u_t.float())
                         
-                        # Accumulate loss for logging
                         total_loss += loss.detach() / self.gradient_accumulate_every
                         accelerator.backward(loss)
+                
+                if accelerator.sync_gradients:
+                    grad_norm = compute_grad_norm(self.v_predictor.parameters())
+                    accelerator.clip_grad_norm_(self.v_predictor.parameters(), 1.0)
+
+                    self.opt.step()
+                    self.lr_scheduler.step()
+                    self.opt.zero_grad()
                     
-                    # This block now runs only after accumulating gradients for the specified number of steps.
-                    if accelerator.sync_gradients:
-                        # Clip gradients
-                        grad_norm = compute_grad_norm(self.v_predictor.parameters())
+                    if (self.step + 1) % self.ema_update_every == 0:
+                        ema(self.v_predictor, self.ema_model, self.ema_decay)
+
+                    if accelerator.is_main_process:
+                        logs = {
+                            "loss": total_loss.item(),
+                            "learning_rate": self.lr_scheduler.get_last_lr()[0],
+                            "grad_norm": grad_norm,
+                            "step": self.step,
+                            "epoch": (self.step * self.gradient_accumulate_every) / len(self.dataloader),
+                            "samples": self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev, 
+                        }
                         
-                        accelerator.clip_grad_norm_(self.v_predictor.parameters(), 1.0)
+                        if self.step > 0 and self.step % self.eval_every == 0:
+                            self.v_predictor.eval()
+                            self.ema_model.eval()
 
-                        # <<< FIX: Compute grad norm AFTER backprop and BEFORE optimizer step
-
-                        # Optimizer step and scheduler
-                        self.opt.step()
-                        self.lr_scheduler.step()
-                        self.opt.zero_grad()
-                        
-                        # EMA update
-                        if (self.step + 1) % self.ema_update_every == 0:
-                            ema(self.v_predictor, self.ema_model, self.ema_decay)
-
-                        if accelerator.is_main_process:
-                            logs = {
-                                "loss": total_loss.item(),
-                                "learning_rate": self.lr_scheduler.get_last_lr()[0],
-                                "grad_norm": grad_norm, # Log the computed norm
-                                "step": self.step,
-                                "epoch": (self.step * self.gradient_accumulate_every) / len(self.dataloader),
-                                "samples": self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev, 
-                            }
+                            total_val_loss = 0.
+                            total_ema_val_loss = 0.
                             
-                            # Validation Logic
-                            if self.step > 0 and self.step % self.eval_every == 0:
-                                self.v_predictor.eval()
-                                self.ema_model.eval()
-
-                                total_val_loss = 0.
-                                total_ema_val_loss = 0.
-                                
-                                val_iter = iter(self.val_dataloader)
-                                num_val_batches = 10  # Only evaluate on 10 batches
-                                
+                            num_val_batches = 10
+                            
+                            for _ in range(num_val_batches):
+                                val_batch = next(self.val_iter)
+                                val_batch = {k: v.to(device) for k, v in val_batch.items()}
                                 with torch.no_grad():
-                                    for _ in range(num_val_batches):
-                                        try:
-                                            val_batch = next(val_iter)
-                                        except StopIteration:
-                                            break
-                                            
-                                        val_batch = {k: v.to(device) for k, v in val_batch.items()}
-                                        if self.use_precomputed_latents:
-                                            t5_embeddings = val_batch['input_latents']
-                                            with torch.no_grad():
-                                                latent = self.ae.latents_from_embeddings(t5_embeddings)
-                                        else:
-                                            with torch.no_grad():
-                                                _, _, latent = self.ae.autoencode(input_ids=val_batch['input_ids'], attention_mask=val_batch.get('attention_mask'))
-                                        
-                                        # Cast latents to the diffusion model's dtype to prevent mismatch
-                                        latent = latent.to(dtype=self.model_dtype)
-
-                                        x_0 = torch.randn_like(latent)
-                                        t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
-                                        
-                                        v_t = self.v_predictor(x_t, t)
-                                        total_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
-
-                                        v_t = self.ema_model(x_t, t)
-                                        total_ema_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
-
-                                last_val_loss = total_val_loss / num_val_batches
-                                last_ema_val_loss = total_ema_val_loss / num_val_batches
+                                    latent = self.ae.get_latents(input_ids=val_batch['input_ids'], attn_mask=val_batch.get('attention_mask'))
                                 
-                                logs["val_loss"] = last_val_loss
-                                logs["val_ema_loss"] = last_ema_val_loss
-                                self.v_predictor.train()
+                                latent = latent.to(dtype=self.model_dtype)
+                                x_0 = torch.randn_like(latent)
+                                t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
+                                
+                                v_t = self.v_predictor(x_t, t)
+                                total_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
+
+                                v_t = self.ema_model(x_t, t)
+                                total_ema_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
+
+                            last_val_loss = total_val_loss / num_val_batches
+                            last_ema_val_loss = total_ema_val_loss / num_val_batches
                             
-                            accelerator.log(logs, step=self.step)
                             logs["val_loss"] = last_val_loss
                             logs["val_ema_loss"] = last_ema_val_loss
-                            pbar.set_postfix(**logs)
                             
+                            self.save() # Save the latest model every evaluation
+                            if last_ema_val_loss < self.best_val_loss:
+                                self.accelerator.print(f"New best EMA validation loss: {last_ema_val_loss:.4f}. Saving model_best.pt")
+                                self.best_val_loss = last_ema_val_loss
+                                self.save(file_name='model_best.pt')
+                                logs["val/best_ema_loss"] = self.best_val_loss
                             
-                        # Reset accumulated loss for the next set of accumulations
-                        total_loss = 0.
+                            self.v_predictor.train()
+                        
+                        accelerator.log(logs, step=self.step)
+                        logs["val_loss"] = last_val_loss
+                        logs["val_ema_loss"] = last_ema_val_loss
+                        pbar.set_postfix(**logs)
+                        
+                    total_loss = 0.
+                    self.step += 1
+                    pbar.update(1)
 
-                        # A training step is completed after the optimizer updates
-                        self.step += 1
-                        pbar.update(1)
-
-                        if accelerator.is_main_process and self.step > 0 and self.step % self.save_and_sample_every == 0:
-                            self.save(self.step)
-                            self.eval(
-                                batch_size=self.eval_bs,
-                                sampling_steps=self.gen_steps,
-                                max_gen_length=self.gen_max_length,
-                                num_samples=self.num_gen_samples,
-                            )
-                
+                    if accelerator.is_main_process and self.step > 0 and self.step % self.save_and_sample_every == 0:
+                        self.eval()
 
     @torch.no_grad()
-    def eval(self,
-             model_path: str = None,
-             batch_size: int = 1,
-             sampling_steps: int = 100,
-             max_gen_length: int = 64,
-             num_samples: int = 50000) -> None:
-        """
-        Evaluate the model by generating samples and calculating perplexity.
-        """
+    def eval(self) -> None:
         accelerator = self.accelerator
-        # It's best practice to use the EMA model for generation.
         model_for_generation = self.accelerator.unwrap_model(self.ema_model)
         model_for_generation.eval()
         self.ae.eval()
 
         generated_texts = []
-        pbar = tqdm(range(0, num_samples, batch_size), desc=f"Generating {num_samples} samples")
+        pbar = tqdm(range(0, self.num_gen_samples, self.gen_batch_size), desc=f"Generating {self.num_gen_samples} samples")
 
         for i in pbar:
-            batch_size = min(batch_size, num_samples - i)
+            batch_size = min(self.gen_batch_size, self.num_gen_samples - i)
             
-            # Generate latents using the diffusion model
             latents = gen_samples(
                 model=model_for_generation,
                 num_latents=self.num_latents,
                 dim_latents=self.latent_dim,
                 batch_size=batch_size,
                 accelerator=self.accelerator,
-                steps=sampling_steps,
-                target_dtype=self.model_dtype, # Pass the correct dtype for noise generation
+                steps=self.gen_steps,
+                target_dtype=self.model_dtype,
                 method="euler"
             )
-            # Decode the latents into text using the VAE
             with torch.no_grad():
-                output_ids = self.ae.decode_latent(latents, max_length=max_gen_length)
-            
+                # This seems to be a custom function in the old VAE, replacing with the standard one
+                output_ids_list = self.ae.decode_latent(latents)
+                output_ids = torch.argmax(output_ids_list, dim=-1)
+
             decoded_batch = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
             generated_texts.extend(decoded_batch)
 
-            # Print samples as they are generated
-            for j, text in enumerate(decoded_batch):
-                print(f"\n--- Sample {i+j+1} ---")
-                print(text)
-                print("-" * (16 + len(str(i+j+1))) + "\n")
+            try:
+                table = wandb.Table(columns=["step", "sample_id", "generated_text"])
+                for j, text in enumerate(decoded_batch):
+                    table.add_data(self.step, i+j, text)
+                self.accelerator.log({"generated_samples": table}, step=self.step)
+            except ImportError:
+                print("wandb not installed, skipping logging of generated samples.")
 
-            # Log to wandb in batches if enabled
-            if "wandb" in self.accelerator.log_with:
-                try:
-                    table = wandb.Table(columns=["step", "sample_id", "generated_text"])
-                    for j, text in enumerate(decoded_batch):
-                        table.add_data(self.step, i+j, text)
-                    self.accelerator.log({"generated_samples": table}, step=self.step)
-                except ImportError:
-                    print("wandb not installed, skipping logging of generated samples.")
-
-            pbar.set_description(f"Generated {len(generated_texts)} samples")
-        print("\nEvaluation finished.")
+        pbar.set_description(f"Generated {len(generated_texts)} samples")
+        # print(generated_texts)
+        # print("\nEvaluation finished.")
+        # Make sure to set the model back to train mode
+        model_for_generation.train()

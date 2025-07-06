@@ -10,6 +10,7 @@ import numpy as np
 from sklearn.metrics import f1_score, accuracy_score
 from contextlib import nullcontext
 import json
+import hashlib
 
 import torch
 import torch.nn as nn
@@ -39,6 +40,7 @@ import evaluation
 
 import torch.profiler
 from torch.profiler import profile, ProfilerActivity
+from omegaconf import DictConfig, OmegaConf
 
 
 generate_kwargs = {
@@ -108,46 +110,24 @@ def compute_grad_norm(parameters):
     return total_norm
 
 
-def get_output_dir(args):
-    model_dir = f'{Path(args.dataset_name).stem}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
-    output_dir = os.path.join(args.save_dir, model_dir)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    print(f'Created {output_dir}')
-    return output_dir
-
 class Trainer(object):
 
     def __init__(self,
-                 args,
-                 dataset_name,
-                 train_bs=32,
-                 eval_bs=64,
-                 init_lr=1e-4,
-                 train_num_steps=100000,
-                 lr_schedule="cosine",
-                 num_warmup_steps=500,
-                 adam_betas=(0.9, 0.99),
-                 adam_weight_decay=0.01,
-                 num_samples=None,
-                 eval_every=1000,
-                 results_folder="./results",
-                 mixed_precision="bf16",
-                 grad_accumulate: int = 16,
-                 seed=412,
+                 cfg: DictConfig,
+                 output_dir: str
                  ) -> None:
         super().__init__()
 
-        set_seeds(seed)
+        set_seeds(cfg.seed)
 
-        self.args = args
+        self.cfg = cfg
 
-        self.best_val_metric = 0
-        self.num_samples = num_samples
+        self.best_val_loss = float('inf')
+        self.num_samples = cfg.data.num_samples
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
-            mixed_precision = mixed_precision, 
+            mixed_precision = cfg.training.mixed_precision, 
             log_with="wandb",
             kwargs_handlers=[ddp_kwargs]
         )
@@ -155,62 +135,73 @@ class Trainer(object):
         self.num_dev = self.accelerator.num_processes
 
         if self.accelerator.is_main_process:
-            if args.output_dir is None:
-                args.output_dir = get_output_dir(args)
-            results_folder = args.output_dir
-            with open(os.path.join(args.output_dir, 'args.json'), 'w') as f:
-                json.dump(args.__dict__, f, indent=2)
+            # Create a unique directory for each run based on its config hash
+            cfg_str = OmegaConf.to_yaml(cfg, resolve=True)
+            cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
+            self.results_folder = Path(output_dir) / cfg_hash
+            self.results_folder.mkdir(parents=True, exist_ok=True)
+            # save the config to the results folder
+            with open(self.results_folder / "config.yaml", "w") as f:
+                f.write(OmegaConf.to_yaml(cfg, resolve=True))
+            print(f"Results folder for this run: {self.results_folder}")
+
             run = os.path.split(__file__)[-1].split(".")[0]
-            if args.wandb_name:
-                self.accelerator.init_trackers(run, config=args,
-                                               init_kwargs={"wandb": {"dir": results_folder, "name": args.wandb_name}})
+            
+            # Use part of the hash to create a unique wandb run name
+            wandb_init_kwargs = {"dir": str(self.results_folder)}
+            if cfg.wandb_name:
+                wandb_init_kwargs["name"] = f"{cfg.wandb_name}-{cfg_hash[:8]}"
             else:
-                self.accelerator.init_trackers(run, config=args, init_kwargs={"wandb": {"dir": results_folder}})
+                wandb_init_kwargs["name"] = f"run-{cfg_hash[:8]}"
 
+            self.accelerator.init_trackers(
+                run,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": wandb_init_kwargs}
+            )
 
-        self.model, self.tokenizer = get_latent_vae_tokenizer(args)
-        self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
+        self.model, self.tokenizer = get_latent_vae_tokenizer(cfg.model)
+        # self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
         self.model: LatentVAEModel = self.model
         
         num_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         if self.accelerator.is_main_process:
             self.accelerator.print(f'num trainable params: {num_trainable_params}')
 
-        self.eval_every = eval_every
+        self.eval_every = cfg.training.eval_every
 
-        self.train_bs = train_bs
-        self.eval_bs = eval_bs
+        self.train_bs = cfg.training.train_bs
+        self.eval_bs = cfg.training.eval_bs
 
-        self.train_num_steps = train_num_steps
+        self.train_num_steps = cfg.training.train_num_steps
 
-        self.dataset = get_dataset(dataset_name)
+        self.dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.num_samples)
 
-        if args.eval:
+        if cfg.eval:
             self.dataset["train"] = self.dataset["train"].select(range(1000))
 
-        self.dataloader = get_dataloader_lvae(args, self.dataset["train"], self.tokenizer, args.max_seq_len,
+        self.dataloader = get_dataloader_lvae(cfg, self.dataset["train"], self.tokenizer, cfg.model.max_seq_len,
                                           context_tokenizer=self.tokenizer)
-        self.val_dataloader = get_dataloader_lvae(args, self.dataset['valid'], self.tokenizer, args.max_seq_len,
+        self.val_dataloader = get_dataloader_lvae(cfg, self.dataset['valid'], self.tokenizer, cfg.model.max_seq_len,
                                              shuffle=False)
         
-        self.max_seq_len = args.max_seq_len
+        self.max_seq_len = cfg.model.max_seq_len
 
         self.opt = get_adamw_optimizer(self.model.parameters(), 
-                                       lr = init_lr, betas = adam_betas,
-                                       weight_decay = adam_weight_decay)
+                                       lr = cfg.training.optimizer.learning_rate, betas = cfg.training.optimizer.adam_betas,
+                                       weight_decay = cfg.training.optimizer.adam_weight_decay)
 
-        self.grad_accumulate = grad_accumulate
+        self.grad_accumulate = cfg.training.grad_accumulate
         
         lr_scheduler = get_scheduler(
-            lr_schedule,
+            cfg.training.optimizer.lr_schedule,
             optimizer = self.opt,
-            num_warmup_steps = num_warmup_steps * self.num_dev,
-            num_training_steps = train_num_steps * self.num_dev,
+            num_warmup_steps = cfg.training.optimizer.lr_warmup_steps * self.num_dev,
+            num_training_steps = cfg.training.train_num_steps * self.num_dev,
         )
 
         if self.accelerator.is_main_process:
-            self.results_folder = Path(results_folder)
-            self.results_folder.mkdir(exist_ok=True)
+            pass
 
         self.step = 0
 
@@ -220,9 +211,18 @@ class Trainer(object):
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
 
-        self.kld_weight = 1e-6
+        self.kld_weight = cfg.training.kld_weight
+        # KLD annealing: start at 0, linearly increase to target weight over first 2000 steps
+        self.kld_annealing_steps = 2000
 
-    def save(self):
+    def get_annealed_kld_weight(self):
+        """Compute the current KLD weight with linear annealing."""
+        if self.step < self.kld_annealing_steps:
+            return self.kld_weight * (self.step / self.kld_annealing_steps)
+        else:
+            return self.kld_weight
+
+    def save(self, file_name='model.pt'):
         if not self.accelerator.is_main_process:
             return
 
@@ -230,10 +230,11 @@ class Trainer(object):
             'step': self.step,
             'model': self.accelerator.get_state_dict(self.model),
             'opt': self.opt.state_dict(),
-            'scaler': self.accelerator.scaler.state_dict() if self.accelerator.scaler is not None else None
+            'scaler': self.accelerator.scaler.state_dict() if self.accelerator.scaler is not None else None,
+            'best_val_loss': self.best_val_loss
         }
 
-        torch.save(data, str(self.results_folder / f'model.pt'))
+        torch.save(data, str(self.results_folder / file_name))
 
     def load(self, file_path=None, resume_training=False):
         file_path = Path(file_path) if exists(file_path) else self.results_folder
@@ -247,11 +248,84 @@ class Trainer(object):
 
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])
+        if 'best_val_loss' in data:
+            self.best_val_loss = data['best_val_loss']
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
         if resume_training:
             for _ in range(self.step):
                 self.lr_scheduler.step()
+
+    @torch.no_grad()
+    def evaluate(self):
+        self.model.eval()
+        accelerator = self.accelerator
+        device = accelerator.device
+        model = self.accelerator.unwrap_model(self.model)
+        
+        num_val_batches = 25
+        total_val_loss = 0.
+        total_recon_loss = 0.
+        total_kld_loss = 0.
+
+        for _ in range(num_val_batches):
+            val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
+            losses = model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"])
+            
+            val_loss = losses['reconstruction_loss'] + self.get_annealed_kld_weight() * losses['kld_loss']
+            total_val_loss += val_loss.item()
+            total_recon_loss += losses['reconstruction_loss'].item()
+            total_kld_loss += losses['kld_loss'].item()
+
+        avg_val_loss = total_val_loss / num_val_batches
+        avg_recon_loss = total_recon_loss / num_val_batches
+        avg_kld_loss = total_kld_loss / num_val_batches
+
+        logs = {
+            "val/loss": avg_val_loss,
+            "val/reconstruction_loss": avg_recon_loss,
+            "val/kld_loss": avg_kld_loss,
+            "step": self.step,
+            "epoch": (self.step * self.grad_accumulate) / len(self.dataloader)
+        }
+        
+        self.save()
+        if avg_val_loss < self.best_val_loss:
+            self.best_val_loss = avg_val_loss
+            self.save(file_name='model_best.pt')
+            logs['val/best_loss'] = self.best_val_loss
+
+        val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
+        input_ids = val_data["input_ids"][:self.cfg.training.eval_bs]
+        
+        embeddings = model.embed(input_ids)
+        attn_mask = val_data.get("attention_mask", torch.ones_like(input_ids))[:self.cfg.training.eval_bs]
+        
+        recon_embeds, _, _ = model.vae(embeddings, attn_mask.bool())
+        recon_logits = model.dembed_head(recon_embeds[..., :input_ids.shape[1], :])
+        recon_ids = torch.argmax(recon_logits, dim=-1)
+
+        original_texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        reconstructed_texts = self.tokenizer.batch_decode(recon_ids, skip_special_tokens=True)
+
+        recon_table = wandb.Table(columns=["Original", "Reconstructed"])
+        for orig, recon in zip(original_texts, reconstructed_texts):
+            recon_table.add_data(orig, recon)
+        logs["reconstructions"] = recon_table
+
+        num_gen_samples = 4
+        latents = torch.randn((num_gen_samples, model.num_latents, model.latent_dim), device=device)
+        gen_logits = model.decode_latent(latents)
+        gen_ids = torch.argmax(gen_logits, dim=-1)
+        generated_texts = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+
+        gen_table = wandb.Table(columns=["Generated Text"])
+        for gen in generated_texts:
+            gen_table.add_data(gen)
+        logs["generated_samples"] = gen_table
+
+        accelerator.log(logs, step=self.step)
+        self.model.train()
 
     def train(self):
         accelerator = self.accelerator
@@ -269,7 +343,7 @@ class Trainer(object):
         with accelerator.autocast():
             losses = self.model(warmup_data["input_ids"], attn_mask=warmup_data["attention_mask"])
             # Use the same loss calculation as in the main loop
-            loss = (losses['reconstruction_loss'] + self.kld_weight * losses['kld_loss']) / self.grad_accumulate
+            loss = (losses['reconstruction_loss'] + self.get_annealed_kld_weight() * losses['kld_loss']) / self.grad_accumulate
 
         self.accelerator.backward(loss)
         self.opt.step()
@@ -299,6 +373,8 @@ class Trainer(object):
                 while self.step < self.train_num_steps:
                     self.opt.zero_grad()
                     total_loss = 0.
+                    total_recon_loss = 0.
+                    total_kld_loss = 0.
                     for _ in range(self.grad_accumulate):
                         
                         data = {k: v.to(device) for k, v in next(self.data_iter).items()}
@@ -306,9 +382,12 @@ class Trainer(object):
                             torch.compiler.cudagraph_mark_step_begin()
                             losses = self.model(data["input_ids"], attn_mask=data["attention_mask"])
                             recon_loss = losses['reconstruction_loss']
-                            kld_loss = self.kld_weight * losses['kld_loss']
-                            loss = (recon_loss + kld_loss) / self.grad_accumulate
+                            kld_loss = losses['kld_loss']
+                            loss = (recon_loss + self.get_annealed_kld_weight() * kld_loss) / self.grad_accumulate
+                        
                         total_loss += loss.item()
+                        total_recon_loss += recon_loss.item() / self.grad_accumulate
+                        total_kld_loss += kld_loss.item() / self.grad_accumulate
                         self.accelerator.backward(loss)
                     
                     accelerator.wait_for_everyone()
@@ -318,31 +397,32 @@ class Trainer(object):
                     self.lr_scheduler.step()
                     accelerator.wait_for_everyone()
 
-                    # --- Logging and Step Update ---
-                    # Log to WandB every 50 optimizer steps
-                    if self.step % 50 == 0 and accelerator.is_main_process:
-                        self.model.eval()
-                        with torch.no_grad():
-                            total_val_loss = 0.
-                            # Use a single validation batch for logging
-                            val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
-                            losses = self.model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"])
-                            
-                            # Note: We don't normalize validation loss as it's for evaluation
-                            val_loss = losses['reconstruction_loss'] + self.kdl_weight * losses['kld_loss']
-                            total_val_loss = val_loss.item()
+                    self.step += 1
+                    log_dict = {'loss': total_loss}
+                    log_dict['recon_loss'] = total_recon_loss
+                    log_dict['kld_loss'] = total_kld_loss
+                    pbar.set_postfix(**log_dict)
+                    pbar.update(1)
 
-                            logs = {"train/loss": total_loss, "val/loss": total_val_loss, "grad_norm": grad_norm,
+                    if accelerator.is_main_process:
+                        if self.step % 50 == 0:
+                            current_kld_weight = self.get_annealed_kld_weight()
+                            logs = {"train/loss": total_loss, 
+                                    "train/recon_loss": total_recon_loss,
+                                    "train/kld_loss": total_kld_loss,
+                                    "train/kld_weight": current_kld_weight,
+                                    "grad_norm": grad_norm,
                                     "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
                                     "epoch": (self.step * self.grad_accumulate) / len(self.dataloader),
                                     "samples": self.step * self.train_bs * self.num_dev * self.grad_accumulate
                                 }
-                            if accelerator.is_main_process:
-                                accelerator.log(logs, step=self.step)
+                            accelerator.log(logs, step=self.step)
+                        
+                        if self.step % self.eval_every == 0:
+                            self.evaluate()
 
-                        self.step += 1
-                        pbar.update(1)
                     # prof.step()
 
         self.save()
         accelerator.print('training complete')
+        return self.best_val_loss

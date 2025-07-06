@@ -108,7 +108,8 @@ def compute_grad_norm(parameters):
 
 
 def get_output_dir(args):
-    model_dir = f'{Path(args.dataset_name).stem}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
+    args_hash = hash(frozenset(args.__dict__.items()))
+    model_dir = f'{Path(args.dataset_name).stem}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{args_hash}'
     output_dir = os.path.join(args.save_dir, model_dir)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -184,7 +185,7 @@ class Trainer(object):
             from dataset_util.dataset_helper import get_dataloader_lvae_t5 as get_dataloader
             self.model, self.tokenizer, config = get_latent_vae_tokenizer_t5(args, ctx, self.num_dev)
             self.model: LatentVAEModel = self.model
-            # self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
+            self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
         else:
             raise Exception("i dunno, erm")
 
@@ -467,7 +468,7 @@ class Trainer(object):
 
                 if self.accelerator.is_main_process:
                     if self.step % self.eval_every == 0:
-                        self.validation()
+                        # self.validation()
                         self.save()
                     
                     if self.sample_every > 0 and self.step > 0 and self.step % self.sample_every == 0:

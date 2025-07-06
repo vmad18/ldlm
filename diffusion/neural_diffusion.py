@@ -68,9 +68,9 @@ class TimestepEmbedder(nn.Module):
     def __init__(self, cfg: DiTConfig):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(cfg.dim, cfg.dim * cfg.expansion_factor),
+            nn.Linear(cfg.dim, int(cfg.dim * cfg.expansion_factor)),
             nn.SiLU(),
-            nn.Linear(cfg.dim * cfg.expansion_factor, cfg.dim),
+            nn.Linear(int(cfg.dim * cfg.expansion_factor), cfg.dim),
         )
         self.frequency_embedding_size = cfg.dim
 
@@ -157,7 +157,7 @@ class CrossAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, cfg: DiTConfig) -> None:
         super().__init__()
-        hidden_dim = cfg.dim * cfg.expansion_factor
+        hidden_dim = int(cfg.dim * cfg.expansion_factor)
         self.mlp = nn.Sequential(
             nn.Linear(cfg.dim, hidden_dim),
             nn.GELU(),
