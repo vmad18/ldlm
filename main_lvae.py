@@ -8,7 +8,7 @@ import sys
 
 from autoencoder.train_lvae import Trainer 
 
-@hydra.main(version_base="1.3", config_path="conf", config_name="train_lvae")
+@hydra.main(version_base="1.3", config_path="conf", config_name="train_lvae_llnl")
 def main(cfg: DictConfig):
     output_dir = HydraConfig.get().run.dir
     print(f"Output directory: {output_dir}")

@@ -1,5 +1,4 @@
 defaults:
-  - override hydra/launcher: my_cluster
   - _self_
 
 # General
