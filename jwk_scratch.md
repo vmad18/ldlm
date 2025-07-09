@@ -38,10 +38,7 @@ python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
     --run_name=babys_first_lvae_N1n1 \
     --pass_run_name=False \
     --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py' \
-    --dryrun
-
-eh?
-
+&& \
 python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
     --rocm_version=6.3.0 \
     --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \

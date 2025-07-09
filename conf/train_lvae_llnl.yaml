@@ -27,7 +27,7 @@ model:
 training:
   train_bs: 48
   eval_bs: 8
-  train_num_steps: 10000
+  train_num_steps: 100000
   eval_every: 1000
   grad_accumulate: 16
   mixed_precision: "bf16"
