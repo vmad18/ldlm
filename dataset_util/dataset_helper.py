@@ -1,4 +1,5 @@
 from multiprocessing.spawn import prepare
+from multiprocess import cpu_count
 import os
 import json
 from typing import Optional
@@ -14,6 +15,7 @@ from datasets import load_from_disk
 
 from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE, DataCollatorForLatentVAET5
 
+NUM_PROC = min(cpu_count(),64) # probably seeing hyperthreading, don't clobber the node
 
 class PrecomputedLatentDataset(Dataset):
     """
@@ -59,41 +61,41 @@ def exists(x):
 def get_dataset(dataset_name, metadata=False, synthetic_train_path=None, shard_size=None):
     if dataset_name == 'roc':
         roc_data_path = 'datasets/ROCstory'
-        dataset = load_dataset("text", data_files={f'{split}': os.path.join(roc_data_path, f'roc_{split}.json') for split in ['train', 'valid']})
+        dataset = load_dataset("text", data_files={f'{split}': os.path.join(roc_data_path, f'roc_{split}.json') for split in ['train', 'valid']}, num_proc=NUM_PROC)
         dataset = process_roc_dataset(dataset)
     elif dataset_name == 'ag_news':
-        dataset = load_dataset('pietrolesci/ag_news', 'original')
+        dataset = load_dataset('pietrolesci/ag_news', 'original', num_proc=NUM_PROC)
         train_ds = dataset['train']
         train_val_ds = train_ds.train_test_split(test_size=1000, seed=42)
         train_val_ds['valid'] = train_val_ds['test']
         train_val_ds['test'] = dataset['test']
         dataset = process_ag_news_dataset(train_val_ds)
     elif dataset_name == 'xsum':
-        dataset = load_dataset('xsum')
+        dataset = load_dataset('xsum', num_proc=NUM_PROC)
         dataset['valid'] = dataset['validation']
         del(dataset['validation'])
         dataset = process_xsum_dataset(dataset)
     elif dataset_name == 'qqp':
         qqp_data_path = 'datasets/qqp'
-        dataset = load_dataset("text", data_files={f'{split}': os.path.join(qqp_data_path, f'{split}.jsonl') for split in ['train', 'valid', 'test']})
+        dataset = load_dataset("text", data_files={f'{split}': os.path.join(qqp_data_path, f'{split}.jsonl') for split in ['train', 'valid', 'test']}, num_proc=NUM_PROC)
         dataset = process_qqp_dataset(dataset)
     elif dataset_name == 'wmt14-de-en':
-        dataset = load_dataset('wmt14', 'de-en')
+        dataset = load_dataset('wmt14', 'de-en', num_proc=NUM_PROC)
         dataset['valid'] = dataset['validation']
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'de-en')
     elif dataset_name == 'wmt14-de-de':
-        dataset = load_dataset('wmt14', 'de-en')
+        dataset = load_dataset('wmt14', 'de-en', num_proc=NUM_PROC)
         dataset['valid'] = dataset['validation']
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'de-de')
     elif dataset_name == 'wmt14-en-de':
-        dataset = load_dataset('wmt14', 'de-en')
+        dataset = load_dataset('wmt14', 'de-en', num_proc=NUM_PROC)
         dataset['valid'] = dataset['validation']
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'en-de')
     elif dataset_name == 'wmt14-en-en':
-        dataset = load_dataset('wmt14', 'de-en')
+        dataset = load_dataset('wmt14', 'de-en', num_proc=NUM_PROC)
         dataset['valid'] = dataset['validation']
         del(dataset['validation'])
         dataset = process_wmt14_dataset(dataset, 'en-en')
@@ -108,7 +110,8 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None, shard_s
 
 def process_fineweb_edu(
     split_ratio = 0.1,
-    output_dir="/scratch/gpfs/ashwinee/datasets/fineweb_edu_splits/", # Directory to save/load splits
+    # output_dir="/scratch/gpfs/ashwinee/datasets/fineweb_edu_splits/", # Directory to save/load splits
+    output_dir=f"/p/vast1/{os.getenv('USER','FIXME')}/.cache/ldlm/datasets/fineweb_edu_splits/", # Directory to save/load splits
     force_resplit=False, # Option to force re-splitting even if files exist
     shard_size: Optional[int] = None # Number of samples to use for a small shard
 ):
@@ -119,7 +122,7 @@ def process_fineweb_edu(
         print(f"Loading pre-split dataset from {split_dataset_path}")
         loaded_ds_dict = DatasetDict.load_from_disk(split_dataset_path)
     else:
-        dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b")
+        dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b", num_proc=NUM_PROC)
         print(f"Splitting dataset: fineweb-edu_10b. This may take some time for large datasets.")
         dataset = dataset['train']
         split_datasets = dataset.train_test_split(
@@ -133,7 +136,7 @@ def process_fineweb_edu(
         })
         
         print(f"Dataset split complete. Saving to {split_dataset_path}...")
-        final_ds_dict.save_to_disk(split_dataset_path, num_proc=32)
+        final_ds_dict.save_to_disk(split_dataset_path, num_proc=NUM_PROC)
         print("Split dataset saved to disk.")
         loaded_ds_dict = final_ds_dict
 
@@ -159,7 +162,7 @@ def process_tiny_stories(
         loaded_ds_dict = DatasetDict.load_from_disk(split_dataset_path)
         return loaded_ds_dict
     else:
-        dataset = load_dataset("roneneldan/TinyStories")
+        dataset = load_dataset("roneneldan/TinyStories", num_proc=NUM_PROC)
         print(f"Splitting dataset: TinyStories. This may take some time for large datasets.")
         dataset = dataset['train']
         split_datasets = dataset.train_test_split(
@@ -173,7 +176,7 @@ def process_tiny_stories(
         })
         
         print(f"Dataset split complete. Saving to {split_dataset_path}...")
-        final_ds_dict.save_to_disk(split_dataset_path)
+        final_ds_dict.save_to_disk(split_dataset_path, num_proc=NUM_PROC)
         print("Split dataset saved to disk.")
         return final_ds_dict
 
@@ -302,14 +305,17 @@ def get_dataloader_lvae(cfg,
 
     # Create a unique path for the tokenized dataset to avoid vocab mismatch.
     sanitized_tokenizer_name = tokenizer.name_or_path.replace("/", "__")
-    processed_data_path = f"tokenized_ds/{cfg.data.dataset_name}/{sanitized_tokenizer_name}_seqlen{max_seq_len}"
+    # processed_data_path = f"tokenized_ds/{cfg.data.dataset_name}/{sanitized_tokenizer_name}_seqlen{max_seq_len}"
+    processed_data_path = f"/p/vast1/{os.getenv('USER','FIXME')}/.cache/ldlm/tokenized_ds/{cfg.data.dataset_name}/{sanitized_tokenizer_name}_seqlen{max_seq_len}"
 
     if os.path.exists(processed_data_path):
         print(f"Loading tokenized dataset from disk: {processed_data_path}")
         tokenized_dataset = load_from_disk(processed_data_path)
     else:
         print("Tokenizing dataset...")        
-        num_cores = os.cpu_count()
+        # since more compute bound I think, no hardcap like NUM_PROC above for downloads
+        # but always leave a smidge
+        num_cores = int(cpu_count() * 0.9)
         tokenized_dataset = dataset.map(
             tokenization,
             batched=True,
@@ -318,7 +324,7 @@ def get_dataloader_lvae(cfg,
             
         )
         print(f"Saving tokenized dataset to disk: {processed_data_path}")
-        tokenized_dataset.save_to_disk(processed_data_path)
+        tokenized_dataset.save_to_disk(processed_data_path, num_proc=NUM_PROC)
     
     batch_size = cfg.training.train_bs if shuffle else cfg.training.eval_bs
     dl = DataLoader(
@@ -390,7 +396,7 @@ def get_dataloader_lvae_t5(
             
         )
         print(f"Saving tokenized dataset to disk: {processed_data_path}")
-        tokenized_dataset.save_to_disk(processed_data_path)
+        tokenized_dataset.save_to_disk(processed_data_path, num_proc=NUM_PROC)
     
     dl = DataLoader(
             tokenized_dataset,
