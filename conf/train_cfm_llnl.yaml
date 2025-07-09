@@ -1,0 +1,55 @@
+defaults:
+  - _self_
+
+# General settings
+general:
+  seed: 412
+  wandb_name: "cfm_diffusion_model"
+  resume_training: False
+  resume_dir: null
+  eval: False
+
+# Data configuration
+data:
+  dataset_name: "fineweb-edu_10b"
+  shard_size: null
+  # precomputed_latents are not supported with the new VAE, so these are commented out
+  # use_precomputed_latents: False
+  # precomputed_latent_path: "./precomputed_latents/"
+
+# Model configuration
+model:
+  # Path to the directory containing the trained VAE (e.g., .../916ca5193e27e9b884dc09d5bf66fe33/)
+  latent_model_path: "/scratch/gpfs/ashwinee/new/ldlm/outputs/2025-07-01/02-30-25/143452a169c694e91cedd27efe948d04"
+  # Diffusion model (DiT) parameters
+  dim: 2048
+  num_layers: 24
+  expansion_factor: 4
+
+# Training parameters
+training:
+  train_bs: 64
+  eval_bs: 64
+  train_num_steps: 80000
+  grad_accumulate: 16
+  mixed_precision: "bf16"
+  save_and_sample_every: 1000
+  eval_every: 1000
+  ema_decay: 0.995
+  ema_update_every: 10
+
+  # Optimizer settings
+  optimizer:
+    learning_rate: 1e-5
+    lr_schedule: "linear"
+    lr_warmup_steps: 100
+    adam_betas: [0.9, 0.99]
+    adam_weight_decay: 0.01
+
+# Evaluation settings (used when general.eval=True)
+eval:
+  path: null # Path to the checkpoint directory for evaluation
+  num_gen_samples: 5
+  gen_steps: 100
+  gen_batch_size: 5
+  gen_max_length: 256 
