@@ -8,6 +8,7 @@ general:
   wandb_name: "cfm_diffusion_model"
   resume_training: False
   resume_dir: null
+  checkpoint_path: null  # Path to resume from external checkpoint directory (overrides resume_dir)
   eval: False
 
 # Data configuration
