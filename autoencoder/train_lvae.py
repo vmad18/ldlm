@@ -462,8 +462,6 @@ class Trainer(object):
         if accelerator.is_main_process:
             profile_dir = str(self.results_folder / "torch_profile")
             trace_handler = torch.profiler.tensorboard_trace_handler(profile_dir)
-        
-        breakpoint()
 
         # with profile(
         #     activities=[ProfilerActivity.CUDA],

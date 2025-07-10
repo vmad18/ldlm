@@ -132,3 +132,21 @@ python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
   --pass_run_name=False \
   --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py data.dataset_name=fineweb_350b'
 
+
+# restarting the existing lvae job
+
+conda_activate $VASTUSER/tuolumne_uv_ldlm && \ 
+python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
+    --rocm_version=6.3.0 \
+    --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \
+    --rccl_cfg=rdzv-lbann \
+    --qos=pbatch \
+    --bank=effml \
+    --repetitions=1 \
+    --minutes=1440 \
+    --nodes=1 \
+    --gpus_per_node=1 \
+    --output_dir=/p/vast1/kirchenb/diffusion-root/ldlm/outputs \
+    --run_name=babys_first_lvae_N1n1 \
+    --pass_run_name=False \
+    --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py model.latent_model_path=/p/vast1/kirchenb/diffusion-root/ldlm/outputs/2025-07-08/21-12-24/ff5a4f56ed6c9067e6196c93d0127cdb'
