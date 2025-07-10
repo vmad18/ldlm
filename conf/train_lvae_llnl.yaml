@@ -22,6 +22,7 @@ model:
   num_latents: 32
   dim_head: 128
   num_layers: 8
+  latent_model_path: null  # Path to resume from external checkpoint
 
 # Training
 training:

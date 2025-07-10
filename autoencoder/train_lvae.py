@@ -134,33 +134,54 @@ class Trainer(object):
 
         self.num_dev = self.accelerator.num_processes
 
+        # Handle checkpoint loading: if loading from external checkpoint, use its config for model creation
+        if cfg.model.get('latent_model_path') is not None:
+            checkpoint_path = Path(cfg.model.latent_model_path)
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+            
+            config_path = checkpoint_path / 'config.yaml'
+            if not config_path.exists():
+                raise FileNotFoundError(f"Config file not found at {config_path}")
+            
+            if self.accelerator.is_main_process:
+                print(f"Loading config from checkpoint: {config_path}")
+            
+            # Load the checkpoint config and use its model config
+            checkpoint_cfg = OmegaConf.load(config_path)
+            # Use the model config from checkpoint, but keep other configs from current run
+            self.cfg = OmegaConf.merge(cfg, {"model": checkpoint_cfg.model})
+            
+            if self.accelerator.is_main_process:
+                print("Using model architecture from checkpoint config")
+
         if self.accelerator.is_main_process:
             # Create a unique directory for each run based on its config hash
-            cfg_str = OmegaConf.to_yaml(cfg, resolve=True)
+            cfg_str = OmegaConf.to_yaml(self.cfg, resolve=True)
             cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
             self.results_folder = Path(output_dir) / cfg_hash
             self.results_folder.mkdir(parents=True, exist_ok=True)
             # save the config to the results folder
             with open(self.results_folder / "config.yaml", "w") as f:
-                f.write(OmegaConf.to_yaml(cfg, resolve=True))
+                f.write(OmegaConf.to_yaml(self.cfg, resolve=True))
             print(f"Results folder for this run: {self.results_folder}")
 
             run = os.path.split(__file__)[-1].split(".")[0]
             
             # Use part of the hash to create a unique wandb run name
             wandb_init_kwargs = {"dir": str(self.results_folder)}
-            if cfg.wandb_name:
-                wandb_init_kwargs["name"] = f"{cfg.wandb_name}-{cfg_hash[:8]}"
+            if self.cfg.wandb_name:
+                wandb_init_kwargs["name"] = f"{self.cfg.wandb_name}-{cfg_hash[:8]}"
             else:
                 wandb_init_kwargs["name"] = f"run-{cfg_hash[:8]}"
 
             self.accelerator.init_trackers(
                 run,
-                config=OmegaConf.to_container(cfg, resolve=True),
+                config=OmegaConf.to_container(self.cfg, resolve=True),
                 init_kwargs={"wandb": wandb_init_kwargs}
             )
 
-        self.model, self.tokenizer = get_latent_vae_tokenizer(cfg.model)
+        self.model, self.tokenizer = get_latent_vae_tokenizer(self.cfg.model)
         # self.model = torch.compile(self.model, mode="max-autotune-no-cudagraphs")
         self.model: LatentVAEModel = self.model
         
@@ -168,36 +189,36 @@ class Trainer(object):
         if self.accelerator.is_main_process:
             self.accelerator.print(f'num trainable params: {num_trainable_params}')
 
-        self.eval_every = cfg.training.eval_every
+        self.eval_every = self.cfg.training.eval_every
 
-        self.train_bs = cfg.training.train_bs
-        self.eval_bs = cfg.training.eval_bs
+        self.train_bs = self.cfg.training.train_bs
+        self.eval_bs = self.cfg.training.eval_bs
 
-        self.train_num_steps = cfg.training.train_num_steps
+        self.train_num_steps = self.cfg.training.train_num_steps
 
-        self.dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.num_samples)
+        self.dataset = get_dataset(self.cfg.data.dataset_name, shard_size=self.cfg.data.num_samples)
 
-        if cfg.eval:
+        if self.cfg.eval:
             self.dataset["train"] = self.dataset["train"].select(range(1000))
 
-        self.dataloader = get_dataloader_lvae(cfg, self.dataset["train"], self.tokenizer, cfg.model.max_seq_len,
+        self.dataloader = get_dataloader_lvae(self.cfg, self.dataset["train"], self.tokenizer, self.cfg.model.max_seq_len,
                                           context_tokenizer=self.tokenizer)
-        self.val_dataloader = get_dataloader_lvae(cfg, self.dataset['valid'], self.tokenizer, cfg.model.max_seq_len,
+        self.val_dataloader = get_dataloader_lvae(self.cfg, self.dataset['valid'], self.tokenizer, self.cfg.model.max_seq_len,
                                              shuffle=False)
         
-        self.max_seq_len = cfg.model.max_seq_len
+        self.max_seq_len = self.cfg.model.max_seq_len
 
         self.opt = get_adamw_optimizer(self.model.parameters(), 
-                                       lr = cfg.training.optimizer.learning_rate, betas = cfg.training.optimizer.adam_betas,
-                                       weight_decay = cfg.training.optimizer.adam_weight_decay)
+                                       lr = self.cfg.training.optimizer.learning_rate, betas = self.cfg.training.optimizer.adam_betas,
+                                       weight_decay = self.cfg.training.optimizer.adam_weight_decay)
 
-        self.grad_accumulate = cfg.training.grad_accumulate
+        self.grad_accumulate = self.cfg.training.grad_accumulate
         
         lr_scheduler = get_scheduler(
-            cfg.training.optimizer.lr_schedule,
+            self.cfg.training.optimizer.lr_schedule,
             optimizer = self.opt,
-            num_warmup_steps = cfg.training.optimizer.lr_warmup_steps * self.num_dev,
-            num_training_steps = cfg.training.train_num_steps * self.num_dev,
+            num_warmup_steps = self.cfg.training.optimizer.lr_warmup_steps * self.num_dev,
+            num_training_steps = self.cfg.training.train_num_steps * self.num_dev,
         )
 
         if self.accelerator.is_main_process:
@@ -208,10 +229,20 @@ class Trainer(object):
         self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
             self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
         
+        # Handle checkpoint loading/resuming
+        if self.cfg.model.get('latent_model_path') is not None:
+            if self.accelerator.is_main_process:
+                print(f"Loading checkpoint from: {self.cfg.model.latent_model_path}")
+            self.load_from_checkpoint(self.cfg.model.latent_model_path, resume_training=True)
+        elif self.cfg.resume_training and self.cfg.resume_dir is not None:
+            if self.accelerator.is_main_process:
+                print(f"Resuming training from: {self.cfg.resume_dir}")
+            self.load(file_path=self.cfg.resume_dir, resume_training=True)
+        
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
 
-        self.kld_weight = cfg.training.kld_weight
+        self.kld_weight = self.cfg.training.kld_weight
         # KLD annealing: start at 0, linearly increase to target weight over first 2000 steps
         self.kld_annealing_steps = 2000
 
@@ -255,6 +286,72 @@ class Trainer(object):
         if resume_training:
             for _ in range(self.step):
                 self.lr_scheduler.step()
+
+    def load_from_checkpoint(self, checkpoint_path, resume_training=False):
+        """Load model from external checkpoint directory."""
+        checkpoint_path = Path(checkpoint_path)
+        accelerator = self.accelerator
+        device = accelerator.device
+        
+        # Try to load from model_best.pt first, then model.pt
+        checkpoint_file = None
+        for filename in ['model_best.pt', 'model.pt']:
+            potential_path = checkpoint_path / filename
+            if potential_path.exists():
+                checkpoint_file = potential_path
+                break
+        
+        if checkpoint_file is None:
+            raise FileNotFoundError(f"No checkpoint file (model_best.pt or model.pt) found in {checkpoint_path}")
+        
+        if accelerator.is_main_process:
+            print(f"Loading checkpoint from: {checkpoint_file}")
+        
+        # Load checkpoint data
+        data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
+        
+        # Load model state
+        model = self.accelerator.unwrap_model(self.model)
+        if 'model' in data:
+            model.load_state_dict(data['model'])
+            if accelerator.is_main_process:
+                print("Successfully loaded model weights from 'model' key.")
+        else:
+            # Handle case where checkpoint is just the state_dict
+            model.load_state_dict(data)
+            if accelerator.is_main_process:
+                print("Loaded model weights from raw state_dict.")
+        
+        # Load training state
+        if 'step' in data:
+            self.step = data['step']
+            if accelerator.is_main_process:
+                print(f"Resuming from step: {self.step}")
+        
+        if 'opt' in data:
+            self.opt.load_state_dict(data['opt'])
+            if accelerator.is_main_process:
+                print("Loaded optimizer state.")
+        
+        if 'best_val_loss' in data:
+            self.best_val_loss = data['best_val_loss']
+            if accelerator.is_main_process:
+                print(f"Best validation loss: {self.best_val_loss}")
+        
+        if exists(self.accelerator.scaler) and 'scaler' in data and exists(data['scaler']):
+            self.accelerator.scaler.load_state_dict(data['scaler'])
+            if accelerator.is_main_process:
+                print("Loaded scaler state.")
+        
+        # Advance learning rate scheduler to current step
+        if resume_training and hasattr(self, 'lr_scheduler'):
+            if accelerator.is_main_process:
+                print(f"Advancing learning rate scheduler by {self.step} steps...")
+            for _ in range(self.step):
+                self.lr_scheduler.step()
+        
+        if accelerator.is_main_process:
+            print("Checkpoint loading complete.")
 
     @torch.no_grad()
     def evaluate(self):
