@@ -94,3 +94,41 @@ pointing that at a ckpt from the prev ongoing N1n1 run gives something like:
 0: 0: 
   0%|          | 12/80000 [01:24<98:40:19,  4.44s/it, epoch=0.00132, grad_norm=0.105, learning_rate=1.2e-6, loss=1.63, samples=11264, step=11, val_ema_loss=nan, val_loss=nan] 
 ```
+
+# taking a look at correctness of multigpu impl
+
+python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
+    --rocm_version=6.3.0 \
+    --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \
+    --rccl_cfg=rdzv-lbann \
+    --qos=pbatch \
+    --bank=guests \
+    --repetitions=1 \
+    --minutes=240 \
+    --nodes=1 \
+    --gpus_per_node=4 \
+    --output_dir=/p/vast1/kirchenb/diffusion-root/ldlm/outputs \
+    --run_name=multigpu_debug_N1n4 \
+    --pass_run_name=False \
+    --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py' \
+    --dryrun
+
+
+# get the big data
+
+
+python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
+  --rocm_version=6.3.0 \
+  --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \
+  --rccl_cfg=rdzv-lbann \
+  --qos=pbatch \
+  --bank=effml \
+  --repetitions=1 \
+  --minutes=1440 \
+  --nodes=1 \
+  --gpus_per_node=1 \
+  --output_dir=/p/vast1/kirchenb/diffusion-root/ldlm/outputs \
+  --run_name=tok_fw_350b_N1n1 \
+  --pass_run_name=False \
+  --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py data.dataset_name=fineweb_350b'
+

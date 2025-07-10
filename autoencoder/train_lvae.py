@@ -204,9 +204,16 @@ class Trainer(object):
             pass
 
         self.step = 0
+        
+        print(self.accelerator.num_processes)
+        print(self.accelerator.process_index)
+        print(self.dataset)
+        print(len(self.dataloader), self.dataloader.batch_size, len(self.dataloader) * self.dataloader.batch_size)
 
         self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
             self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
+        
+        print(len(self.dataloader), self.dataloader.total_batch_size, self.dataloader.total_dataset_length)
         
         self.data_iter = cycle(self.dataloader)
         self.val_iter = cycle(self.val_dataloader)
@@ -359,6 +366,8 @@ class Trainer(object):
         if accelerator.is_main_process:
             profile_dir = str(self.results_folder / "torch_profile")
             trace_handler = torch.profiler.tensorboard_trace_handler(profile_dir)
+        
+        breakpoint()
 
         # with profile(
         #     activities=[ProfilerActivity.CUDA],

@@ -101,6 +101,10 @@ def get_dataset(dataset_name, metadata=False, synthetic_train_path=None, shard_s
         dataset = process_wmt14_dataset(dataset, 'en-en')
     elif dataset_name == "fineweb-edu_10b":
         dataset = process_fineweb_edu(shard_size=shard_size)
+    # elif dataset_name == "fineweb_100b":
+    #     dataset = process_fineweb_100b(shard_size=shard_size)
+    elif dataset_name == "fineweb_350b":
+        dataset = process_fineweb_350b(shard_size=shard_size)
     elif dataset_name == "tiny_stories":
         dataset = process_tiny_stories()
     else:
@@ -124,6 +128,55 @@ def process_fineweb_edu(
     else:
         dataset = load_dataset("EleutherAI/fineweb-edu-dedup-10b", num_proc=NUM_PROC)
         print(f"Splitting dataset: fineweb-edu_10b. This may take some time for large datasets.")
+        dataset = dataset['train']
+        split_datasets = dataset.train_test_split(
+            test_size = split_ratio,
+            seed = 42
+        )
+
+        final_ds_dict = DatasetDict({
+            'train': split_datasets['train'],
+            'valid': split_datasets['test']
+        })
+        
+        print(f"Dataset split complete. Saving to {split_dataset_path}...")
+        final_ds_dict.save_to_disk(split_dataset_path, num_proc=NUM_PROC)
+        print("Split dataset saved to disk.")
+        loaded_ds_dict = final_ds_dict
+
+    if shard_size is not None:
+        print(f"Creating a small shard of size {shard_size} for testing.")
+        loaded_ds_dict['train'] = loaded_ds_dict['train'].select(range(shard_size))
+        # Also shard the validation set proportionally
+        val_shard_size = max(1, int(shard_size * split_ratio))
+        loaded_ds_dict['valid'] = loaded_ds_dict['valid'].select(range(val_shard_size))
+
+    return loaded_ds_dict
+
+
+def process_fineweb_350b(
+    split_ratio = 0.1,
+    # output_dir="/scratch/gpfs/ashwinee/datasets/fineweb_edu_splits/", # Directory to save/load splits
+    output_dir=f"/p/vast1/{os.getenv('USER','FIXME')}/.cache/ldlm/datasets/fineweb_350b_splits/", # Directory to save/load splits
+    force_resplit=False, # Option to force re-splitting even if files exist
+    shard_size: Optional[int] = None # Number of samples to use for a small shard
+):
+    # If this function does fail (eg. hang), its possible it just needs to be run standalone.
+    # I suspect, but do not know, that something wonky is happening between slurm/flux, accelerate,
+    # and whatever mp pool datasets tries to spin up for the download at this moment.
+    # This fn can be imported from the root and run arg-less in an interactive session.
+    # TODO: make a "preproc" top level script that takes the ds name and just does this.
+
+    os.makedirs(output_dir, exist_ok=True)
+    split_dataset_path = os.path.join(output_dir, f"fineweb_350b_split_valid{int(split_ratio*100)}")
+
+    if os.path.exists(split_dataset_path) and not force_resplit:
+        print(f"Loading pre-split dataset from {split_dataset_path}")
+        loaded_ds_dict = DatasetDict.load_from_disk(split_dataset_path)
+    else:
+        print(f"Loading fineweb_350b. If downloading, this could take some time or fail.")
+        dataset = load_dataset("HuggingFaceFW/fineweb", "sample-350BT", num_proc=NUM_PROC)
+        print(f"Splitting dataset: fineweb_350b. This may take some time for large datasets.")
         dataset = dataset['train']
         split_datasets = dataset.train_test_split(
             test_size = split_ratio,
