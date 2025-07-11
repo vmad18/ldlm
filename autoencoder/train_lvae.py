@@ -286,7 +286,7 @@ class Trainer(object):
             if (self.cfg.model.get('latent_model_path') is not None or 
                 (self.cfg.resume_training and self.cfg.resume_dir is not None)) and self.step > 0:
                 # We're resuming training, so wind the data generator to the correct position
-                from ldlm.dataset_util.dataset_helper import wind_data_generator
+                from dataset_util.dataset_helper import wind_data_generator
                 
                 if self.accelerator.is_main_process:
                     print(f"Winding data generator to step {self.step}")
@@ -306,11 +306,9 @@ class Trainer(object):
                 )
                 
                 # For validation, we don't need to wind (always start from beginning)
-                from ldlm.dataset_util.dataset_helper import get_val_dataloader_lvae_bin
-                val_bin_pattern = getattr(self.cfg.data, 'val_bin_pattern', self.cfg.data.train_bin_pattern)
-                self.val_iter = get_val_dataloader_lvae_bin(
+                self.val_iter = get_dataloader_lvae_bin(
                     self.cfg,
-                    val_bin_pattern,
+                    self.cfg.data.val_bin_pattern,
                     rank,
                     world_size,
                     tokenizer=self.tokenizer
