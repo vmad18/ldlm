@@ -18,14 +18,14 @@ RCCL_CFG = "rdzv-lbann"
 # WANDB_OFFLINE = "False"
 WANDB_OFFLINE = "True"
 
-QOS = "pdebug"
-# QOS = "pbatch"
+# QOS = "pdebug"
+QOS = "pbatch"
 
 # BANK = "guests"
 BANK = "effml"
 
-TIME_LIMIT = 10  # in minutes
-# TIME_LIMIT = 1440 
+# TIME_LIMIT = 10  # in minutes
+TIME_LIMIT = 1440 
 
 REPETITIONS = 1
 # REPETITIONS = 3
@@ -34,25 +34,27 @@ DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-BASE_RUN_NAME = f"test_sweep"
+# BASE_RUN_NAME = f"test_sweep"
+# BASE_RUN_NAME = f"train_lvae_100b_debug"
+BASE_RUN_NAME = f"train_lvae_100b"
 
 INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 
 # Cfgs
-
 # gpn = gpus per node
-# args in order are:
-# script, cli_args, nodes, gpn, mbsz, accum, seq_len, lr ...
-
+# arg list is:
+# script, cli_args, nodes, gpn, mbsz, accum, seq_len, lr, ...
 exp_list = [
-    ["main_lvae.py", "", 1, 1, 48, 16, 512, 1e-4],
-    ["main_lvae.py", "", 1, 1, 64, 12, 512, 1e-4],
+    # ["main_lvae.py", "", 1, 1, 48, 16, 512, 1e-4],
+    # ["main_lvae.py", "", 1, 1, 64, 12, 512, 1e-4],
     ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
-    ["main_lvae.py", "", 1, 1, 128, 6, 512, 1e-4],
+    # ["main_lvae.py", "", 1, 1, 128, 6, 512, 1e-4],
 ]
 
+# add an additional sweep for each prev cfg over somthing like lr or seed etc.
 # sweep_hparam = [
 #     ["null"],
+#     [1234, 4321, 1738],
 # ]
 # exp_list = list(chain(*[[exp + hp for hp in sweep_hparam] for exp in exp_list]))
 

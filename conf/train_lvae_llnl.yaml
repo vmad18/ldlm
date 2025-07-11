@@ -27,7 +27,7 @@ data:
 
 # Model
 model:
-  max_seq_len: 128
+  max_seq_len: 512
   d_model: 768
   latent_dim: 1536
   num_latents: 32
@@ -44,11 +44,11 @@ model:
 
 # Training
 training:
-  train_bs: 48
+  train_bs: 96
   eval_bs: 8
-  train_num_steps: 100000
-  eval_every: 10
-  grad_accumulate: 16
+  train_num_steps: 254314 # 100e9 / (768*512) = 254,313.1510416667
+  eval_every: 1000
+  grad_accumulate: 8
   mixed_precision: "bf16"
   kld_weight: 1e-3
   # Optimizer
