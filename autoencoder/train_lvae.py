@@ -125,6 +125,15 @@ class Trainer(object):
         self.best_val_loss = float('inf')
         # self.num_samples = cfg.data.num_samples # FIXME make this flexibly optional
 
+        # On APUs like MI300A and GH200, gpu and cpu memory are shared and so both types of allocations
+        # fight for the same space. Tends to make thing behave/fail better when you cap useable vram
+        if hasattr(self.cfg, "per_process_vram_ratio"):
+            assert (
+                self.cfg.per_process_vram_ratio > 0.0 and self.cfg.per_process_vram_ratio < 1.0
+            ), f"Invalid per_process_vram_ratio: {self.cfg.per_process_vram_ratio}, must be in (0.0, 1.0)"
+            torch.cuda.set_per_process_memory_fraction(self.cfg.per_process_vram_ratio)
+            print(f"per_process_vram_ratio set to: {self.cfg.per_process_vram_ratio}")
+
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
             mixed_precision = cfg.training.mixed_precision, 
@@ -548,7 +557,7 @@ class Trainer(object):
 
         # log the shape of the warmup batch
         print(f'input_ids.shape: {warmup_data["input_ids"].shape}')
-        # and the leading tokens of the rows as an indication of whether they're distributed or not
+        # and the leading tokens of the leading rows as an indication of whether they're distributed or not
         print(f'input_ids.shape: {warmup_data["input_ids"][:4,:10]}')
         
         # Full forward, backward, and optimizer step to trigger compilation

@@ -1,6 +1,9 @@
 defaults:
   - _self_
 
+# Cluster shenanigans
+per_process_vram_ratio: 0.8
+
 # General
 seed: 412
 wandb_name: "scratch_latent_vae"

@@ -24,15 +24,13 @@ QOS = "pdebug"
 # BANK = "guests"
 BANK = "effml"
 
-TIME_LIMIT = 5  # in minutes
+TIME_LIMIT = 10  # in minutes
+# TIME_LIMIT = 1440 
 
 REPETITIONS = 1
 # REPETITIONS = 3
 # DEPENDENCY = "afterany"
 DEPENDENCY = None
-
-# GPN = 4  # gpus per node
-# GPN = 1  # gpus per node
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
@@ -42,16 +40,15 @@ INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index
 
 # Cfgs
 
+# gpn = gpus per node
 # args in order are:
-    #  script, cli_args, nodes, gpn, mbsz, accum, lr ...
+# script, cli_args, nodes, gpn, mbsz, accum, seq_len, lr ...
 
 exp_list = [
-    # ["main_lvae.py", "", 1, 1, 48, 16, 1e-4],
-    ["main_lvae.py", "", 1, 1, 48, 1, 1e-4],
-    ["main_lvae.py", "", 1, 1, 64, 1, 1e-4],
-    ["main_lvae.py", "", 1, 1, 128, 1, 1e-4],
-    ["main_lvae.py", "", 1, 1, 256, 1, 1e-4],
-    ["main_lvae.py", "", 1, 1, 512, 1, 1e-4],
+    ["main_lvae.py", "", 1, 1, 48, 16, 512, 1e-4],
+    ["main_lvae.py", "", 1, 1, 64, 12, 512, 1e-4],
+    ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
+    ["main_lvae.py", "", 1, 1, 128, 6, 512, 1e-4],
 ]
 
 # sweep_hparam = [
@@ -75,10 +72,10 @@ for exp in final_exp_list:
         gpn,
         mbsz,
         accum,
+        seq_len,
         lr,
     ) = exp
 
-    # gpus = nodes * GPN
     gpus = nodes * gpn
 
     # mod lr
@@ -86,14 +83,14 @@ for exp in final_exp_list:
     lr_cfg_string = f" training.optimizer.learning_rate={lr}"
     cli_args += lr_cfg_string
 
-    # mod bsz
-    # wbsz = nodes * GPN * mbsz * accum
+    # mod bsz and seq len
     wbsz = nodes * gpn * mbsz * accum
-    bsz_name_str = f"mb{mbsz}-acc{accum}-wb{wbsz}"
-    train_bsz_cfg_string = f" training.train_bs={mbsz} training.grad_accumulate={accum}"
+    bsz_name_str = f"mb{mbsz}-acc{accum}-wb{wbsz}-seq{seq_len}"
+    train_bsz_cfg_string = f" training.train_bs={mbsz} training.grad_accumulate={accum} model.max_seq_len={seq_len}"
     cli_args += train_bsz_cfg_string
 
-    # mod more things ...
+    # mod more things 
+    # ...
 
     # join to a unique run name for the experiment
     run_name = f"{BASE_RUN_NAME}_{script.strip('.py')}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
@@ -101,6 +98,7 @@ for exp in final_exp_list:
     # put together the actual "train.py" command
     custom_invocation = f"{INVOCATION_PREAMBLE} {script} {cli_args}"
 
+    # make the complete launcher command
     command = f"""\
     python {LAUNCHER_FILEPATH} \
         --output_dir={BASE_OUT_DIR}/{BASE_RUN_NAME} \
