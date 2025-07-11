@@ -13,6 +13,9 @@ save_dir: "saved_latent_models"
 data:
   dataset_name: "fineweb-edu_10b"
   num_samples: null
+  train_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin"
+  val_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin"
+  total_tokens: 100000000000
 
 # Model
 model:
@@ -23,7 +26,7 @@ model:
   dim_head: 128
   num_layers: 8
   latent_model_path: null  # Path to resume from external checkpoint
-
+  tokenizer_name: "gpt2"
 # Training
 training:
   train_bs: 48

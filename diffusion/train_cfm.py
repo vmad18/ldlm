@@ -20,7 +20,7 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
 from autoencoder.latent_vae import get_latent_vae_tokenizer
-from dataset_util.dataset_helper import get_dataset, get_dataloader_lvae
+from dataset_util.dataset_helper import get_dataset, get_dataloader_lvae, get_dataloader_lvae_bin, get_val_dataloader_lvae_bin
 from omegaconf import DictConfig, OmegaConf
 
 from diffusion.cond_flow_matcher import ConditionalFlowMatcher
@@ -30,6 +30,7 @@ from accelerate import Accelerator, DistributedDataParallelKwargs, InitProcessGr
 import wandb
 
 import os
+import hashlib
 
 import copy
 
@@ -222,7 +223,7 @@ class Trainer(object):
             trainer.model_dtype = torch.float32
         
         # --- 6. Load the Model Weights ---
-        trainer.load(model_checkpoint_path)
+        trainer.load_for_generation(model_checkpoint_path)
         
         return trainer
 
@@ -238,7 +239,6 @@ class Trainer(object):
             mixed_precision=cfg.training.mixed_precision,
             gradient_accumulation_steps=cfg.training.grad_accumulate,
             log_with="wandb",
-            project_dir=output_dir,
             kwargs_handlers=[ddp_kwargs, init_process_kwargs],
         )
 
@@ -250,9 +250,24 @@ class Trainer(object):
         else:
             self.model_dtype = torch.float32
 
-        self.output_dir = Path(output_dir)
         self.num_dev = self.accelerator.num_processes
         self.cfg = cfg
+
+        if self.accelerator.is_main_process:
+            # Create a unique directory for each run based on its config hash
+            cfg_str = OmegaConf.to_yaml(cfg, resolve=True)
+            cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
+            self.output_dir = Path(output_dir) / cfg_hash
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            # save the config to the results folder
+            with open(self.output_dir / "config.yaml", "w") as f:
+                f.write(OmegaConf.to_yaml(cfg, resolve=True))
+            print(f"Results folder for this run: {self.output_dir}")
+        else:
+            # For non-main processes, we still need to set output_dir for consistency
+            cfg_str = OmegaConf.to_yaml(cfg, resolve=True)
+            cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
+            self.output_dir = Path(output_dir) / cfg_hash
 
         self.save_and_sample_every = cfg.training.save_and_sample_every
         self.train_bs = cfg.training.train_bs
@@ -305,11 +320,20 @@ class Trainer(object):
         self.latent_dim = self.ae.latent_dim
         
         if self.accelerator.is_main_process:
-            run_name = cfg.general.wandb_name or "cfm_diffusion_model"
+            # Use the same config hash for wandb run name as used for directory
+            cfg_str = OmegaConf.to_yaml(cfg, resolve=True)
+            cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
+            
+            wandb_init_kwargs = {"dir": str(self.output_dir)}
+            if cfg.general.wandb_name:
+                wandb_init_kwargs["name"] = f"{cfg.general.wandb_name}-{cfg_hash[:8]}"
+            else:
+                wandb_init_kwargs["name"] = f"cfm_diffusion-{cfg_hash[:8]}"
+            
             self.accelerator.init_trackers(
                 project_name="ldlm_diffusion",
                 config=OmegaConf.to_container(cfg, resolve=True),
-                init_kwargs={"wandb": {"name": run_name}}
+                init_kwargs={"wandb": wandb_init_kwargs}
             )
 
         print("Creating ConditionalFlowMatcher")
@@ -341,36 +365,146 @@ class Trainer(object):
             num_training_steps=cfg.training.train_num_steps * self.num_dev,
         )
 
-        dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.shard_size)
-        self.dataset = dataset.shuffle(seed=cfg.general.seed)
+        # Check if we should use bin files or the old dataset loading
+        self.use_bin_files = hasattr(cfg.data, 'train_bin_pattern') and cfg.data.train_bin_pattern is not None
+        
+        if self.use_bin_files:
+            # Use new bin file data loading
+            if self.accelerator.is_main_process:
+                self.accelerator.print("Using .bin file data loading")
+                self.accelerator.print(f"Train bin pattern: {cfg.data.train_bin_pattern}")
+                if hasattr(cfg.data, 'val_bin_pattern') and cfg.data.val_bin_pattern:
+                    self.accelerator.print(f"Val bin pattern: {cfg.data.val_bin_pattern}")
+            
+            # Get rank and world size from accelerator
+            rank = self.accelerator.process_index
+            world_size = self.accelerator.num_processes
+            
+            # Create a config that combines training settings with VAE model settings for bin files
+            bin_cfg = OmegaConf.create({
+                'training': {
+                    'train_bs': cfg.training.train_bs,
+                    'eval_bs': cfg.training.eval_bs
+                },
+                'model': {
+                    'max_seq_len': loaded_vae_cfg.model.max_seq_len
+                }
+            })
+            
+            self.dataloader = get_dataloader_lvae_bin(
+                bin_cfg, 
+                cfg.data.train_bin_pattern, 
+                rank, 
+                world_size,
+                tokenizer=self.tokenizer
+            )
+            
+            self.val_dataloader = get_dataloader_lvae_bin(
+                bin_cfg, 
+                cfg.data.val_bin_pattern, 
+                rank, 
+                world_size,
+                tokenizer=self.tokenizer
+            )
+            
+            # For bin files, we don't have a fixed dataset size for validation samples
+            self.num_samples_eval = 1000  # Arbitrary number for bin files
+        else:
+            # Use old dataset loading approach
+            if self.accelerator.is_main_process:
+                self.accelerator.print("Using traditional dataset loading")
+            
+            dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.shard_size)
+            self.dataset = dataset.shuffle(seed=cfg.general.seed)
+            self.num_samples_eval = len(self.dataset['valid'])
 
-        self.num_samples_eval = len(self.dataset['valid'])
+            # Use the loaded VAE config for the dataloader
+            loaded_vae_cfg.training.train_bs = cfg.training.train_bs
+            self.dataloader = get_dataloader_lvae(
+                loaded_vae_cfg, self.dataset['train'], self.tokenizer,
+                loaded_vae_cfg.model.max_seq_len
+            )
+            
+            loaded_vae_cfg.training.eval_bs = cfg.training.eval_bs
+            self.val_dataloader = get_dataloader_lvae(
+                loaded_vae_cfg, self.dataset['valid'], self.tokenizer,
+                loaded_vae_cfg.model.max_seq_len, shuffle=False
+            )
 
         self.train_num_steps = cfg.training.train_num_steps
-
-        # Use the loaded VAE config for the dataloader
-        loaded_vae_cfg.training.train_bs = cfg.training.train_bs
-        self.dataloader = get_dataloader_lvae(
-            loaded_vae_cfg, self.dataset['train'], self.tokenizer,
-            loaded_vae_cfg.model.max_seq_len
-        )
-        
-        loaded_vae_cfg.training.eval_bs = cfg.training.eval_bs
-        self.val_dataloader = get_dataloader_lvae(
-            loaded_vae_cfg, self.dataset['valid'], self.tokenizer,
-            loaded_vae_cfg.model.max_seq_len, shuffle=False
-        )
-
         self.step = 0
 
         self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader = self.accelerator.prepare(
             self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader)
 
+        # Handle checkpoint loading/resuming
+        if cfg.general.get('checkpoint_path') is not None:
+            if self.accelerator.is_main_process:
+                print(f"Loading checkpoint from: {cfg.general.checkpoint_path}")
+            self.load_from_checkpoint(cfg.general.checkpoint_path, resume_training=True)
+        elif cfg.general.resume_training and cfg.general.resume_dir is not None:
+            if self.accelerator.is_main_process:
+                print(f"Resuming training from: {cfg.general.resume_dir}")
+            checkpoint_file = Path(cfg.general.resume_dir) / 'model.pt'
+            if checkpoint_file.exists():
+                self.load_for_training(str(checkpoint_file), resume_training=True)
+
         model_size = sum(p.numel() for p in self.v_predictor.parameters())
         self.accelerator.print(f"Model params: {model_size / 1e6:.2f} M")
 
-        self.data_iter = cycle(self.dataloader)
-        self.val_iter = cycle(self.val_dataloader)
+        # Create data iterators based on loading method
+        if self.use_bin_files:
+            # For bin files, check if we need to resume from a specific position
+            if (cfg.general.get('checkpoint_path') is not None or 
+                (cfg.general.resume_training and cfg.general.resume_dir is not None)) and self.step > 0:
+                # We're resuming training, so wind the data generator to the correct position
+                from dataset_util.dataset_helper import wind_data_generator_cfm
+                
+                if self.accelerator.is_main_process:
+                    print(f"Winding CFM data generator to step {self.step}")
+                
+                # Get rank and world size
+                rank = self.accelerator.process_index
+                world_size = self.accelerator.num_processes
+                
+                # Create a config that combines training settings with VAE model settings for winding
+                wind_cfg = OmegaConf.create({
+                    'training': {
+                        'train_bs': cfg.training.train_bs,
+                        'gradient_accumulate_every': cfg.training.grad_accumulate
+                    },
+                    'model': {
+                        'max_seq_len': loaded_vae_cfg.model.max_seq_len
+                    }
+                })
+                
+                # Wind the training data generator
+                self.data_iter = wind_data_generator_cfm(
+                    wind_cfg,
+                    cfg.data.train_bin_pattern,
+                    self.step,
+                    rank,
+                    world_size,
+                    tokenizer=self.tokenizer
+                )
+                
+                # For validation, we don't need to wind (always start from beginning)
+                self.val_iter = get_dataloader_lvae_bin(
+                    wind_cfg,
+                    cfg.data.val_bin_pattern,
+                    rank,
+                    world_size,
+                    tokenizer=self.tokenizer
+                )
+            else:
+                # Normal startup, use the already created data loaders
+                self.data_iter = self.dataloader
+                self.val_iter = self.val_dataloader
+        else:
+            # Traditional data loaders need to be wrapped with cycle
+            self.data_iter = cycle(self.dataloader)
+            self.val_iter = cycle(self.val_dataloader)
+            
         self.best_val_loss = float('inf')
 
     def save(self, file_name='model.pt'):
@@ -395,7 +529,8 @@ class Trainer(object):
         # We don't need to re-save the VAE, it's already in its own directory
         print(f'Saved diffusion model checkpoint to {model_save_path}')
 
-    def load(self, file_path):
+    def load_for_generation(self, file_path):
+        """Load model for generation/inference only."""
         data = torch.load(file_path, map_location="cpu", weights_only=False)
 
         model = self.accelerator.unwrap_model(self.v_predictor)
@@ -411,12 +546,81 @@ class Trainer(object):
         self.step = data['step']
         if 'best_val_loss' in data:
             self.best_val_loss = data['best_val_loss']
-        # You might want to resume optimizer and scheduler state as well
-        # self.opt.load_state_dict(data['opt'])
-        # self.lr_scheduler.load_state_dict(data['scheduler'])
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
+
+    def load_for_training(self, file_path, resume_training=False):
+        """Load model for training with full state restoration."""
+        data = torch.load(file_path, map_location="cpu", weights_only=False)
+
+        model = self.accelerator.unwrap_model(self.v_predictor)
+        ema_model = self.accelerator.unwrap_model(self.ema_model)
+        model.load_state_dict(data['model'])
+        
+        if 'ema_model' in data:
+            ema_model.load_state_dict(data['ema_model'])
+
+        model.to(self.accelerator.device)
+        ema_model.to(self.accelerator.device) 
+
+        # Load training state
+        if 'step' in data:
+            self.step = data['step']
+            if self.accelerator.is_main_process:
+                print(f"Resuming from step: {self.step}")
+
+        if 'best_val_loss' in data:
+            self.best_val_loss = data['best_val_loss']
+            if self.accelerator.is_main_process:
+                print(f"Best validation loss: {self.best_val_loss}")
+
+        if resume_training:
+            if 'opt' in data:
+                self.opt.load_state_dict(data['opt'])
+                if self.accelerator.is_main_process:
+                    print("Loaded optimizer state.")
+            
+            if 'scheduler' in data:
+                self.lr_scheduler.load_state_dict(data['scheduler'])
+                if self.accelerator.is_main_process:
+                    print("Loaded scheduler state.")
+
+        if exists(self.accelerator.scaler) and exists(data['scaler']):
+            self.accelerator.scaler.load_state_dict(data['scaler'])
+            if self.accelerator.is_main_process:
+                print("Loaded scaler state.")
+
+        if self.accelerator.is_main_process:
+            print("Checkpoint loading complete.")
+
+    def load_from_checkpoint(self, checkpoint_path, resume_training=False):
+        """Load model from external checkpoint directory."""
+        checkpoint_path = Path(checkpoint_path)
+        
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+        
+        # Try to load from model_best.pt first, then model.pt
+        checkpoint_file = None
+        for filename in ['model_best.pt', 'model.pt']:
+            potential_path = checkpoint_path / filename
+            if potential_path.exists():
+                checkpoint_file = potential_path
+                break
+        
+        if checkpoint_file is None:
+            raise FileNotFoundError(f"No checkpoint file (model_best.pt or model.pt) found in {checkpoint_path}")
+        
+        if self.accelerator.is_main_process:
+            print(f"Loading checkpoint from: {checkpoint_file}")
+        
+        self.load_for_training(str(checkpoint_file), resume_training=resume_training)
+
+    # Keep the original load method for backward compatibility
+    def load(self, file_path):
+        """Legacy load method - redirects to load_for_generation."""
+        return self.load_for_generation(file_path)
 
     def train(self):
         accelerator = self.accelerator
@@ -458,15 +662,34 @@ class Trainer(object):
                         ema(self.v_predictor, self.ema_model, self.ema_decay)
 
                     if accelerator.is_main_process:
+                        # Calculate epoch differently for bin files vs traditional datasets
+                        if self.use_bin_files:
+                            # Calculate tokens processed: step * batch_size * grad_accumulate * num_devices * seq_len
+                            # Note: we need to get max_seq_len from the loaded VAE config
+                            max_seq_len = getattr(self.cfg.model, 'max_seq_len', 1024)  # fallback if not in config
+                            tokens_processed = self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev * max_seq_len
+                            # Assume 100B tokens in dataset (can be made configurable)
+                            total_dataset_tokens = getattr(self.cfg.data, 'total_tokens', 100_000_000_000)  # 100B default
+                            epoch = tokens_processed / total_dataset_tokens
+                            
+                            # Log progress for bin files
+                            if self.step % 500 == 0:  # Log every 500 steps
+                                progress_pct = (tokens_processed / total_dataset_tokens) * 100
+                                tokens_b = tokens_processed / 1_000_000_000  # Convert to billions
+                                total_b = total_dataset_tokens / 1_000_000_000
+                                accelerator.print(f"Progress: {progress_pct:.2f}% ({tokens_b:.2f}B / {total_b:.1f}B tokens)")
+                        else:
+                            epoch = (self.step * self.gradient_accumulate_every) / len(self.dataloader)
+                            
                         logs = {
                             "loss": total_loss.item(),
                             "learning_rate": self.lr_scheduler.get_last_lr()[0],
                             "grad_norm": grad_norm,
                             "step": self.step,
-                            "epoch": (self.step * self.gradient_accumulate_every) / len(self.dataloader),
+                            "epoch": epoch,
                             "samples": self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev, 
                         }
-                        
+
                         if self.step > 0 and self.step % self.eval_every == 0:
                             self.v_predictor.eval()
                             self.ema_model.eval()

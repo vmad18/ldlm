@@ -8,15 +8,16 @@ general:
   wandb_name: "cfm_diffusion_model"
   resume_training: False
   resume_dir: null
+  checkpoint_path: null  # Path to resume from external checkpoint directory (overrides resume_dir)
   eval: False
 
-# Data configuration
+# Data
 data:
   dataset_name: "fineweb-edu_10b"
-  shard_size: null
-  # precomputed_latents are not supported with the new VAE, so these are commented out
-  # use_precomputed_latents: False
-  # precomputed_latent_path: "./precomputed_latents/"
+  num_samples: null
+  train_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin"
+  val_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin"
+  total_tokens: 100000000000
 
 # Model configuration
 model:

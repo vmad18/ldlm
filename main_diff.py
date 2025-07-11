@@ -16,6 +16,11 @@ from diffusion.train_cfm import Trainer
 def main(cfg: DictConfig) -> None:
     """
     Main training script for the diffusion model, configured with Hydra.
+    
+    To resume training from a checkpoint, use:
+    uv run main_diff.py general.checkpoint_path=/path/to/checkpoint/directory
+    
+    The checkpoint directory should contain either model_best.pt or model.pt
     """
     # Hydra automatically creates a unique output directory for each run
     output_dir = HydraConfig.get().run.dir
