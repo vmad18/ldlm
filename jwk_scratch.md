@@ -135,7 +135,7 @@ python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
 
 # restarting the existing lvae job
 
-conda_activate $VASTUSER/tuolumne_uv_ldlm && \ 
+conda_activate $VASTUSER/tuolumne_uv_ldlm && \
 python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
     --rocm_version=6.3.0 \
     --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \
@@ -150,3 +150,43 @@ python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
     --run_name=babys_first_lvae_N1n1 \
     --pass_run_name=False \
     --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py model.latent_model_path=/p/vast1/kirchenb/diffusion-root/ldlm/outputs/2025-07-08/21-12-24/ff5a4f56ed6c9067e6196c93d0127cdb'
+
+
+# test the merged in bin file data logic
+
+conda_activate $VASTUSER/tuolumne_uv_ldlm && \
+python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
+    --rocm_version=6.3.0 \
+    --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \
+    --rccl_cfg=rdzv-lbann \
+    --qos=pdebug \
+    --bank=effml \
+    --repetitions=1 \
+    --minutes=59 \
+    --nodes=1 \
+    --gpus_per_node=1 \
+    --output_dir=/p/vast1/kirchenb/diffusion-root/ldlm/outputs \
+    --run_name=debug_bin_logic_lvae_N1n1 \
+    --pass_run_name=False \
+    --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match main_lvae.py'
+
+(cfm can only be run with a vae trained on the correct tokenizer)
+
+python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
+    --rocm_version=6.3.0 \
+    --rccl_installdir=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3.1/install/lib \
+    --rccl_cfg=rdzv-lbann \
+    --qos=pdebug \
+    --bank=effml \
+    --repetitions=1 \
+    --minutes=59 \
+    --nodes=1 \
+    --gpus_per_node=1 \
+    --output_dir=/p/vast1/kirchenb/diffusion-root/ldlm/outputs \
+    --run_name=debug_bin_logic_ldlm_N1n1 \
+    --pass_run_name=False \
+    --custom_invocation='export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run main_diff.py model.latent_model_path=/p/vast1/kirchenb/diffusion-root/ldlm/outputs/2025-07-11/11-01-22/d3ca981bc3e2e1a6ce7bdc396dd21939'
+
+Okay I think we're good on the new data (at least for N1n1).
+
+# next, tune the hparams to make it go brr

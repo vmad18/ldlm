@@ -123,7 +123,7 @@ class Trainer(object):
         self.cfg = cfg
 
         self.best_val_loss = float('inf')
-        self.num_samples = cfg.data.num_samples
+        # self.num_samples = cfg.data.num_samples # FIXME make this flexibly optional
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
@@ -237,7 +237,7 @@ class Trainer(object):
             if self.accelerator.is_main_process:
                 self.accelerator.print("Using traditional dataset loading")
             
-            self.dataset = get_dataset(self.cfg.data.dataset_name, shard_size=self.cfg.data.num_samples)
+            self.dataset = get_dataset(self.cfg.data.dataset_name) #, shard_size=self.cfg.data.num_samples) # FIXME make this flexibly optional
 
             if self.cfg.eval:
                 self.dataset["train"] = self.dataset["train"].select(range(1000))
@@ -266,16 +266,10 @@ class Trainer(object):
             pass
 
         self.step = 0
-        
-        print(self.accelerator.num_processes)
-        print(self.accelerator.process_index)
-        print(self.dataset)
-        print(len(self.dataloader), self.dataloader.batch_size, len(self.dataloader) * self.dataloader.batch_size)
 
         self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
             self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
-        
-        print(len(self.dataloader), self.dataloader.total_batch_size, self.dataloader.total_dataset_length)
+
         # Handle checkpoint loading/resuming
         if self.cfg.model.get('latent_model_path') is not None:
             if self.accelerator.is_main_process:

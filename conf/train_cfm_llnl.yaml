@@ -7,12 +7,21 @@ general:
   wandb_name: "cfm_diffusion_model"
   resume_training: False
   resume_dir: null
+  checkpoint_path: null  # Path to resume from external checkpoint directory (overrides resume_dir)
   eval: False
 
 # Data configuration
 data:
-  dataset_name: "fineweb-edu_10b"
-  shard_size: null
+  # BIN FILE APPROACH (recommended for performance with large datasets)
+  # Remove the comment (#) from the lines below to use .bin files:
+  train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
+  val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
+  total_tokens: 100000000000
+
+  # TRADITIONAL DATASET LOADING (default approach)
+  # Comment out these lines if using bin files above:
+  # dataset_name: "fineweb-edu_10b"
+  # num_samples: null
   # precomputed_latents are not supported with the new VAE, so these are commented out
   # use_precomputed_latents: False
   # precomputed_latent_path: "./precomputed_latents/"
@@ -20,11 +29,17 @@ data:
 # Model configuration
 model:
   # Path to the directory containing the trained VAE (e.g., .../916ca5193e27e9b884dc09d5bf66fe33/)
-  latent_model_path: "/scratch/gpfs/ashwinee/new/ldlm/outputs/2025-07-01/02-30-25/143452a169c694e91cedd27efe948d04"
+  latent_model_path: null
   # Diffusion model (DiT) parameters
   dim: 2048
   num_layers: 24
   expansion_factor: 4
+  # BIN FILE APPROACH (recommended for performance with large datasets)
+  # Remove the comment (#) from the lines below to use .bin files:
+  tokenizer_name: "gpt2"
+  # TRADITIONAL DATASET LOADING (default approach)
+  # Comment out these lines if using bin files above:
+  # tokenizer_name: "meta-llama/Llama-3.2-1B"
 
 # Training parameters
 training:
