@@ -501,7 +501,11 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     assert len(files) > 0, f"No files found matching pattern: {filename_pattern}"
     assert batch_size % world_size == 0, f"Batch size {batch_size} must be divisible by world size {world_size}"
     
-    local_batch_size = batch_size // world_size
+    # local_batch_size = batch_size // world_size
+    # FIXME: lets identify batch_size as passed from config, as the local batch size
+    # accumulation and more workers then multiply this out to create the effective world batch size.
+    # later logic might not be correct for more than one rank now.
+    local_batch_size = batch_size
     
     # Start from the specified file index
     if start_file_idx >= len(files):

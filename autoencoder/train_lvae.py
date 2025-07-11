@@ -132,6 +132,20 @@ class Trainer(object):
             kwargs_handlers=[ddp_kwargs]
         )
 
+        assert self.accelerator.num_processes == 1, "Multi-gpu training is no bueno rn"
+        print(
+            f"Accelerator (RANK: {self.accelerator.process_index}, "
+            f"LOCAL_RANK: {self.accelerator.local_process_index}, "
+            f"WORLD_SIZE: {self.accelerator.num_processes}) - "
+            f"Mixed Precision: {self.accelerator.mixed_precision}, "
+            f"Device: {self.accelerator.device}, "
+        )
+        # these have no setters and are not constructor args (straight to jail)
+        # self.accelerator.local_process_index = os.getenv("LOCAL_RANK", 0)
+        # self.accelerator.process_index = os.getenv("RANK", 0)
+        # self.accelerator.num_processes = os.getenv("WOLRD_SIZE", 1)
+        # so we're gonna ignore them
+
         self.num_dev = self.accelerator.num_processes
 
         # Handle checkpoint loading: if loading from external checkpoint, use its config for model creation
@@ -267,8 +281,14 @@ class Trainer(object):
 
         self.step = 0
 
-        self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
-            self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
+        if self.use_bin_files:
+            # in this case, dataset parallelization is handled by the dataset/loader constructors
+            # so having accelerate parallelize them further would be incorrect
+            self.model, self.opt, self.lr_scheduler = self.accelerator.prepare(
+                self.model, self.opt, lr_scheduler)
+        else:
+            self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
+                self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
 
         # Handle checkpoint loading/resuming
         if self.cfg.model.get('latent_model_path') is not None:
@@ -525,6 +545,11 @@ class Trainer(object):
 
         # Get one batch for warm-up
         warmup_data = {k: v.to(device) for k, v in next(self.data_iter).items()}
+
+        # log the shape of the warmup batch
+        print(f'input_ids.shape: {warmup_data["input_ids"].shape}')
+        # and the leading tokens of the rows as an indication of whether they're distributed or not
+        print(f'input_ids.shape: {warmup_data["input_ids"][:4,:10]}')
         
         # Full forward, backward, and optimizer step to trigger compilation
         with accelerator.autocast():
