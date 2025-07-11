@@ -25,7 +25,7 @@ from typing import Tuple
 from transformers import get_scheduler
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
-from dataset_util.dataset_helper import get_dataset, get_dataloader, get_dataloader_lvae
+from dataset_util.dataset_helper import get_dataset, get_dataloader, get_dataloader_lvae, get_dataloader_lvae_bin, get_val_dataloader_lvae_bin
 
 from PIL import Image
 from tqdm.auto import tqdm
@@ -147,10 +147,16 @@ class Trainer(object):
             if self.accelerator.is_main_process:
                 print(f"Loading config from checkpoint: {config_path}")
             
+            # Preserve the latent_model_path from command line before merging
+            original_latent_model_path = cfg.model.latent_model_path
+            
             # Load the checkpoint config and use its model config
             checkpoint_cfg = OmegaConf.load(config_path)
             # Use the model config from checkpoint, but keep other configs from current run
             self.cfg = OmegaConf.merge(cfg, {"model": checkpoint_cfg.model})
+            
+            # Restore the latent_model_path so we know we're resuming
+            self.cfg.model.latent_model_path = original_latent_model_path
             
             if self.accelerator.is_main_process:
                 print("Using model architecture from checkpoint config")
@@ -196,15 +202,50 @@ class Trainer(object):
 
         self.train_num_steps = self.cfg.training.train_num_steps
 
-        self.dataset = get_dataset(self.cfg.data.dataset_name, shard_size=self.cfg.data.num_samples)
+        # Check if we should use bin files or the old dataset loading
+        self.use_bin_files = hasattr(self.cfg.data, 'train_bin_pattern') and self.cfg.data.train_bin_pattern is not None
+        
+        if self.use_bin_files:
+            # Use new bin file data loading
+            if self.accelerator.is_main_process:
+                self.accelerator.print("Using .bin file data loading")
+                self.accelerator.print(f"Train bin pattern: {self.cfg.data.train_bin_pattern}")
+                if hasattr(self.cfg.data, 'val_bin_pattern') and self.cfg.data.val_bin_pattern:
+                    self.accelerator.print(f"Val bin pattern: {self.cfg.data.val_bin_pattern}")
+            
+            # Get rank and world size from accelerator
+            rank = self.accelerator.process_index
+            world_size = self.accelerator.num_processes
+            
+            self.dataloader = get_dataloader_lvae_bin(
+                self.cfg, 
+                self.cfg.data.train_bin_pattern, 
+                rank, 
+                world_size,
+                tokenizer=self.tokenizer
+            )
+            
+            self.val_dataloader = get_dataloader_lvae_bin(
+                self.cfg, 
+                self.cfg.data.val_bin_pattern, 
+                rank, 
+                world_size,
+                tokenizer=self.tokenizer
+            )
+        else:
+            # Use old dataset loading approach
+            if self.accelerator.is_main_process:
+                self.accelerator.print("Using traditional dataset loading")
+            
+            self.dataset = get_dataset(self.cfg.data.dataset_name, shard_size=self.cfg.data.num_samples)
 
-        if self.cfg.eval:
-            self.dataset["train"] = self.dataset["train"].select(range(1000))
+            if self.cfg.eval:
+                self.dataset["train"] = self.dataset["train"].select(range(1000))
 
-        self.dataloader = get_dataloader_lvae(self.cfg, self.dataset["train"], self.tokenizer, self.cfg.model.max_seq_len,
-                                          context_tokenizer=self.tokenizer)
-        self.val_dataloader = get_dataloader_lvae(self.cfg, self.dataset['valid'], self.tokenizer, self.cfg.model.max_seq_len,
-                                             shuffle=False)
+            self.dataloader = get_dataloader_lvae(self.cfg, self.dataset["train"], self.tokenizer, self.cfg.model.max_seq_len,
+                                              context_tokenizer=self.tokenizer)
+            self.val_dataloader = get_dataloader_lvae(self.cfg, self.dataset['valid'], self.tokenizer, self.cfg.model.max_seq_len,
+                                                 shuffle=False)
         
         self.max_seq_len = self.cfg.model.max_seq_len
 
@@ -239,8 +280,49 @@ class Trainer(object):
                 print(f"Resuming training from: {self.cfg.resume_dir}")
             self.load(file_path=self.cfg.resume_dir, resume_training=True)
         
-        self.data_iter = cycle(self.dataloader)
-        self.val_iter = cycle(self.val_dataloader)
+        # Create data iterators based on loading method - AFTER checkpoint loading so step is set
+        if self.use_bin_files:
+            # For bin files, check if we need to resume from a specific position
+            if (self.cfg.model.get('latent_model_path') is not None or 
+                (self.cfg.resume_training and self.cfg.resume_dir is not None)) and self.step > 0:
+                # We're resuming training, so wind the data generator to the correct position
+                from ldlm.dataset_util.dataset_helper import wind_data_generator
+                
+                if self.accelerator.is_main_process:
+                    print(f"Winding data generator to step {self.step}")
+                
+                # Get rank and world size
+                rank = self.accelerator.process_index
+                world_size = self.accelerator.num_processes
+                
+                # Wind the training data generator
+                self.data_iter = wind_data_generator(
+                    self.cfg,
+                    self.cfg.data.train_bin_pattern,
+                    self.step,
+                    rank,
+                    world_size,
+                    tokenizer=self.tokenizer
+                )
+                
+                # For validation, we don't need to wind (always start from beginning)
+                from ldlm.dataset_util.dataset_helper import get_val_dataloader_lvae_bin
+                val_bin_pattern = getattr(self.cfg.data, 'val_bin_pattern', self.cfg.data.train_bin_pattern)
+                self.val_iter = get_val_dataloader_lvae_bin(
+                    self.cfg,
+                    val_bin_pattern,
+                    rank,
+                    world_size,
+                    tokenizer=self.tokenizer
+                )
+            else:
+                # Normal startup, use the already created data loaders
+                self.data_iter = self.dataloader
+                self.val_iter = self.val_dataloader
+        else:
+            # Traditional data loaders need to be wrapped with cycle
+            self.data_iter = cycle(self.dataloader)
+            self.val_iter = cycle(self.val_dataloader)
 
         self.kld_weight = self.cfg.training.kld_weight
         # KLD annealing: start at 0, linearly increase to target weight over first 2000 steps
@@ -378,12 +460,22 @@ class Trainer(object):
         avg_recon_loss = total_recon_loss / num_val_batches
         avg_kld_loss = total_kld_loss / num_val_batches
 
+        # Calculate epoch differently for bin files vs traditional datasets
+        if self.use_bin_files:
+            # Calculate tokens processed: step * batch_size * grad_accumulate * num_devices * seq_len
+            tokens_processed = self.step * self.train_bs * self.grad_accumulate * self.num_dev * self.max_seq_len
+            # Assume 100B tokens in dataset (can be made configurable)
+            total_dataset_tokens = getattr(self.cfg.data, 'total_tokens', 100_000_000_000)  # 100B default
+            epoch = tokens_processed / total_dataset_tokens
+        else:
+            epoch = (self.step * self.grad_accumulate) / len(self.dataloader)
+            
         logs = {
             "val/loss": avg_val_loss,
             "val/reconstruction_loss": avg_recon_loss,
             "val/kld_loss": avg_kld_loss,
             "step": self.step,
-            "epoch": (self.step * self.grad_accumulate) / len(self.dataloader)
+            "epoch": epoch
         }
         
         self.save()
@@ -504,16 +596,35 @@ class Trainer(object):
                     if accelerator.is_main_process:
                         if self.step % 50 == 0:
                             current_kld_weight = self.get_annealed_kld_weight()
+                            
+                            # Calculate epoch differently for bin files vs traditional datasets
+                            if self.use_bin_files:
+                                # Calculate tokens processed: step * batch_size * grad_accumulate * num_devices * seq_len
+                                tokens_processed = self.step * self.train_bs * self.grad_accumulate * self.num_dev * self.max_seq_len
+                                # Assume 100B tokens in dataset (can be made configurable)
+                                total_dataset_tokens = getattr(self.cfg.data, 'total_tokens', 100_000_000_000)  # 100B default
+                                epoch = tokens_processed / total_dataset_tokens
+                                
+                                # Log progress for bin files
+                                if self.step % 500 == 0:  # Log every 500 steps
+                                    progress_pct = (tokens_processed / total_dataset_tokens) * 100
+                                    tokens_b = tokens_processed / 1_000_000_000  # Convert to billions
+                                    total_b = total_dataset_tokens / 1_000_000_000
+                                    accelerator.print(f"Progress: {progress_pct:.2f}% ({tokens_b:.2f}B / {total_b:.1f}B tokens)")
+                            else:
+                                epoch = (self.step * self.grad_accumulate) / len(self.dataloader)
+                                
                             logs = {"train/loss": total_loss, 
                                     "train/recon_loss": total_recon_loss,
                                     "train/kld_loss": total_kld_loss,
                                     "train/kld_weight": current_kld_weight,
                                     "grad_norm": grad_norm,
                                     "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step,
-                                    "epoch": (self.step * self.grad_accumulate) / len(self.dataloader),
+                                    "epoch": epoch,
                                     "samples": self.step * self.train_bs * self.num_dev * self.grad_accumulate
                                 }
                             accelerator.log(logs, step=self.step)
+                        
                         
                         if self.step % self.eval_every == 0:
                             self.evaluate()

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, GPT2Tokenizer  
 
 from .ae import VariationalAutoEncoder, Config, create_enc_dec_cfg
 from contextlib import nullcontext
@@ -111,7 +111,7 @@ class LatentVAEModel(nn.Module):
 
         recon_encs, mu, log_var = self.vae(embeddings, attn_mask.bool())
         recon_encs = self.dembed_head(recon_encs[..., :s, :])
-        return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), input_ids.view(-1), mu, log_var)
+        return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), input_ids.view(-1).to(torch.int64), mu, log_var)
 
     def forward(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
         return self.autoencode(input_ids, attn_mask)
@@ -128,11 +128,12 @@ class LatentVAEModel(nn.Module):
             block.compile(**compile_kwargs)
 
 
-def get_latent_vae_tokenizer(model_cfg, tokenizer_name: str = "meta-llama/Llama-3.2-1B") -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+def get_latent_vae_tokenizer(model_cfg) -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
+    tokenizer = GPT2Tokenizer.from_pretrained(model_cfg.tokenizer_name)
     
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    # TODO: do we need this?
+    # if tokenizer.pad_token is None:
+    #     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     
     vae = LatentVAEModel(
         vocab_size = len(tokenizer),

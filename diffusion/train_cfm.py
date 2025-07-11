@@ -20,7 +20,7 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
 from autoencoder.latent_vae import get_latent_vae_tokenizer
-from dataset_util.dataset_helper import get_dataset, get_dataloader_lvae
+from dataset_util.dataset_helper import get_dataset, get_dataloader_lvae, get_dataloader_lvae_bin, get_val_dataloader_lvae_bin
 from omegaconf import DictConfig, OmegaConf
 
 from diffusion.cond_flow_matcher import ConditionalFlowMatcher
@@ -365,26 +365,75 @@ class Trainer(object):
             num_training_steps=cfg.training.train_num_steps * self.num_dev,
         )
 
-        dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.shard_size)
-        self.dataset = dataset.shuffle(seed=cfg.general.seed)
+        # Check if we should use bin files or the old dataset loading
+        self.use_bin_files = hasattr(cfg.data, 'train_bin_pattern') and cfg.data.train_bin_pattern is not None
+        
+        if self.use_bin_files:
+            # Use new bin file data loading
+            if self.accelerator.is_main_process:
+                self.accelerator.print("Using .bin file data loading")
+                self.accelerator.print(f"Train bin pattern: {cfg.data.train_bin_pattern}")
+                if hasattr(cfg.data, 'val_bin_pattern') and cfg.data.val_bin_pattern:
+                    self.accelerator.print(f"Val bin pattern: {cfg.data.val_bin_pattern}")
+            
+            # Get rank and world size from accelerator
+            rank = self.accelerator.process_index
+            world_size = self.accelerator.num_processes
+            
+            # Create a config that combines training settings with VAE model settings for bin files
+            bin_cfg = OmegaConf.create({
+                'training': {
+                    'train_bs': cfg.training.train_bs,
+                    'eval_bs': cfg.training.eval_bs
+                },
+                'model': {
+                    'max_seq_len': loaded_vae_cfg.model.max_seq_len
+                }
+            })
+            
+            self.dataloader = get_dataloader_lvae_bin(
+                bin_cfg, 
+                cfg.data.train_bin_pattern, 
+                rank, 
+                world_size,
+                tokenizer=self.tokenizer
+            )
+            
+            # Use validation bin files if specified, otherwise use train files for validation
+            val_bin_pattern = getattr(cfg.data, 'val_bin_pattern', cfg.data.train_bin_pattern)
+            self.val_dataloader = get_val_dataloader_lvae_bin(
+                bin_cfg, 
+                val_bin_pattern, 
+                rank, 
+                world_size,
+                tokenizer=self.tokenizer
+            )
+            
+            # For bin files, we don't have a fixed dataset size for validation samples
+            self.num_samples_eval = 1000  # Arbitrary number for bin files
+        else:
+            # Use old dataset loading approach
+            if self.accelerator.is_main_process:
+                self.accelerator.print("Using traditional dataset loading")
+            
+            dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.shard_size)
+            self.dataset = dataset.shuffle(seed=cfg.general.seed)
+            self.num_samples_eval = len(self.dataset['valid'])
 
-        self.num_samples_eval = len(self.dataset['valid'])
+            # Use the loaded VAE config for the dataloader
+            loaded_vae_cfg.training.train_bs = cfg.training.train_bs
+            self.dataloader = get_dataloader_lvae(
+                loaded_vae_cfg, self.dataset['train'], self.tokenizer,
+                loaded_vae_cfg.model.max_seq_len
+            )
+            
+            loaded_vae_cfg.training.eval_bs = cfg.training.eval_bs
+            self.val_dataloader = get_dataloader_lvae(
+                loaded_vae_cfg, self.dataset['valid'], self.tokenizer,
+                loaded_vae_cfg.model.max_seq_len, shuffle=False
+            )
 
         self.train_num_steps = cfg.training.train_num_steps
-
-        # Use the loaded VAE config for the dataloader
-        loaded_vae_cfg.training.train_bs = cfg.training.train_bs
-        self.dataloader = get_dataloader_lvae(
-            loaded_vae_cfg, self.dataset['train'], self.tokenizer,
-            loaded_vae_cfg.model.max_seq_len
-        )
-        
-        loaded_vae_cfg.training.eval_bs = cfg.training.eval_bs
-        self.val_dataloader = get_dataloader_lvae(
-            loaded_vae_cfg, self.dataset['valid'], self.tokenizer,
-            loaded_vae_cfg.model.max_seq_len, shuffle=False
-        )
-
         self.step = 0
 
         self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader = self.accelerator.prepare(
@@ -405,8 +454,60 @@ class Trainer(object):
         model_size = sum(p.numel() for p in self.v_predictor.parameters())
         self.accelerator.print(f"Model params: {model_size / 1e6:.2f} M")
 
-        self.data_iter = cycle(self.dataloader)
-        self.val_iter = cycle(self.val_dataloader)
+        # Create data iterators based on loading method
+        if self.use_bin_files:
+            # For bin files, check if we need to resume from a specific position
+            if (cfg.general.get('checkpoint_path') is not None or 
+                (cfg.general.resume_training and cfg.general.resume_dir is not None)) and self.step > 0:
+                # We're resuming training, so wind the data generator to the correct position
+                from ldlm.dataset_util.dataset_helper import wind_data_generator_cfm, get_val_dataloader_lvae_bin
+                
+                if self.accelerator.is_main_process:
+                    print(f"Winding CFM data generator to step {self.step}")
+                
+                # Get rank and world size
+                rank = self.accelerator.process_index
+                world_size = self.accelerator.num_processes
+                
+                # Create a config that combines training settings with VAE model settings for winding
+                wind_cfg = OmegaConf.create({
+                    'training': {
+                        'train_bs': cfg.training.train_bs,
+                        'gradient_accumulate_every': cfg.training.grad_accumulate
+                    },
+                    'model': {
+                        'max_seq_len': loaded_vae_cfg.model.max_seq_len
+                    }
+                })
+                
+                # Wind the training data generator
+                self.data_iter = wind_data_generator_cfm(
+                    wind_cfg,
+                    cfg.data.train_bin_pattern,
+                    self.step,
+                    rank,
+                    world_size,
+                    tokenizer=self.tokenizer
+                )
+                
+                # For validation, we don't need to wind (always start from beginning)
+                val_bin_pattern = getattr(cfg.data, 'val_bin_pattern', cfg.data.train_bin_pattern)
+                self.val_iter = get_val_dataloader_lvae_bin(
+                    wind_cfg,
+                    val_bin_pattern,
+                    rank,
+                    world_size,
+                    tokenizer=self.tokenizer
+                )
+            else:
+                # Normal startup, use the already created data loaders
+                self.data_iter = self.dataloader
+                self.val_iter = self.val_dataloader
+        else:
+            # Traditional data loaders need to be wrapped with cycle
+            self.data_iter = cycle(self.dataloader)
+            self.val_iter = cycle(self.val_dataloader)
+            
         self.best_val_loss = float('inf')
 
     def save(self, file_name='model.pt'):
@@ -564,12 +665,31 @@ class Trainer(object):
                         ema(self.v_predictor, self.ema_model, self.ema_decay)
 
                     if accelerator.is_main_process:
+                        # Calculate epoch differently for bin files vs traditional datasets
+                        if self.use_bin_files:
+                            # Calculate tokens processed: step * batch_size * grad_accumulate * num_devices * seq_len
+                            # Note: we need to get max_seq_len from the loaded VAE config
+                            max_seq_len = getattr(self.cfg.model, 'max_seq_len', 1024)  # fallback if not in config
+                            tokens_processed = self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev * max_seq_len
+                            # Assume 100B tokens in dataset (can be made configurable)
+                            total_dataset_tokens = getattr(self.cfg.data, 'total_tokens', 100_000_000_000)  # 100B default
+                            epoch = tokens_processed / total_dataset_tokens
+                            
+                            # Log progress for bin files
+                            if self.step % 500 == 0:  # Log every 500 steps
+                                progress_pct = (tokens_processed / total_dataset_tokens) * 100
+                                tokens_b = tokens_processed / 1_000_000_000  # Convert to billions
+                                total_b = total_dataset_tokens / 1_000_000_000
+                                accelerator.print(f"Progress: {progress_pct:.2f}% ({tokens_b:.2f}B / {total_b:.1f}B tokens)")
+                        else:
+                            epoch = (self.step * self.gradient_accumulate_every) / len(self.dataloader)
+                            
                         logs = {
                             "loss": total_loss.item(),
                             "learning_rate": self.lr_scheduler.get_last_lr()[0],
                             "grad_norm": grad_norm,
                             "step": self.step,
-                            "epoch": (self.step * self.gradient_accumulate_every) / len(self.dataloader),
+                            "epoch": epoch,
                             "samples": self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev, 
                         }
                         
