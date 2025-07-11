@@ -399,11 +399,9 @@ class Trainer(object):
                 tokenizer=self.tokenizer
             )
             
-            # Use validation bin files if specified, otherwise use train files for validation
-            val_bin_pattern = getattr(cfg.data, 'val_bin_pattern', cfg.data.train_bin_pattern)
-            self.val_dataloader = get_val_dataloader_lvae_bin(
+            self.val_dataloader = get_dataloader_lvae_bin(
                 bin_cfg, 
-                val_bin_pattern, 
+                cfg.data.val_bin_pattern, 
                 rank, 
                 world_size,
                 tokenizer=self.tokenizer
@@ -460,7 +458,7 @@ class Trainer(object):
             if (cfg.general.get('checkpoint_path') is not None or 
                 (cfg.general.resume_training and cfg.general.resume_dir is not None)) and self.step > 0:
                 # We're resuming training, so wind the data generator to the correct position
-                from ldlm.dataset_util.dataset_helper import wind_data_generator_cfm, get_val_dataloader_lvae_bin
+                from dataset_util.dataset_helper import wind_data_generator_cfm
                 
                 if self.accelerator.is_main_process:
                     print(f"Winding CFM data generator to step {self.step}")
@@ -491,10 +489,9 @@ class Trainer(object):
                 )
                 
                 # For validation, we don't need to wind (always start from beginning)
-                val_bin_pattern = getattr(cfg.data, 'val_bin_pattern', cfg.data.train_bin_pattern)
-                self.val_iter = get_val_dataloader_lvae_bin(
+                self.val_iter = get_dataloader_lvae_bin(
                     wind_cfg,
-                    val_bin_pattern,
+                    cfg.data.val_bin_pattern,
                     rank,
                     world_size,
                     tokenizer=self.tokenizer
@@ -692,7 +689,7 @@ class Trainer(object):
                             "epoch": epoch,
                             "samples": self.step * self.train_bs * self.gradient_accumulate_every * self.num_dev, 
                         }
-                        
+
                         if self.step > 0 and self.step % self.eval_every == 0:
                             self.v_predictor.eval()
                             self.ema_model.eval()

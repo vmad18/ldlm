@@ -11,18 +11,13 @@ general:
   checkpoint_path: null  # Path to resume from external checkpoint directory (overrides resume_dir)
   eval: False
 
-# Data configuration
+# Data
 data:
-  # BIN FILE APPROACH (recommended for performance with large datasets)
-  # Remove the comment (#) from the lines below to use .bin files:
-  # train_bin_pattern: "data/train_*.bin"  # glob pattern for training .bin files
-  # val_bin_pattern: "data/val_*.bin"      # glob pattern for validation .bin files (optional)
-  # total_tokens: 100000000000  # Total tokens in dataset (100B) - used for epoch calculation with bin files
-  
-  # TRADITIONAL DATASET LOADING (default approach)
-  # Comment out these lines if using bin files above:
   dataset_name: "fineweb-edu_10b"
-  shard_size: null
+  num_samples: null
+  train_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin"
+  val_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin"
+  total_tokens: 100000000000
 
 # Model configuration
 model:
