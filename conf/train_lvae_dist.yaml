@@ -8,16 +8,17 @@ model:
   latent_dim: 1024
   num_latents: 32
   dim_head: 128
-  max_seq_len: 1024
+  max_seq_len: 128
   num_layers: 4
   tokenizer_name: "gpt2"
 
 # Training configuration
 train_num_steps: 10000
-train_bs: 8
-eval_bs: 8
+train_bs: 128
+eval_bs: 128
 eval_every: 500
-grad_accumulate: 4
+grad_accumulate: 1
+resume_from: null
 
 # Data configuration
 train_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin"

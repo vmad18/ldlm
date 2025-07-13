@@ -28,7 +28,7 @@ def create_training_config(cfg: DictConfig) -> TrainingConfig:
     
     # Create training configuration
     training_cfg = TrainingConfig(
-        model_config=model_cfg,
+        model_config=model_cfg,  # Changed back to model_config
         train_num_steps=cfg.train_num_steps,
         train_bs=cfg.train_bs,
         eval_bs=cfg.eval_bs,

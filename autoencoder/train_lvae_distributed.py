@@ -33,6 +33,44 @@ from dataset_util.dataset_helper import get_dataloader_lvae_bin, wind_data_gener
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+@dataclass
+class TrainingConfig:
+    # Model configuration
+    model_config: DictConfig  # Changed from model to model_config
+    
+    # Training configuration
+    train_num_steps: int = 10000
+    train_bs: int = 8
+    eval_bs: int = 8
+    eval_every: int = 1000
+    grad_accumulate: int = 1
+    
+    # Data configuration
+    train_bin_pattern: str = "data/train_*.bin"
+    val_bin_pattern: str = "data/val_*.bin"
+    total_tokens: int = 100_000_000_000  # 100B tokens
+    
+    # Optimization configuration
+    learning_rate: float = 1e-4
+    adam_betas: Tuple[float, float] = (0.9, 0.95)
+    adam_weight_decay: float = 0.1
+    adam_eps: float = 1e-8
+    muon_lr: float = 0.02
+    muon_momentum: float = 0.95
+    
+    # VAE configuration
+    kld_weight: float = 1e-4
+    kld_annealing_steps: int = 2000
+    
+    # Logging configuration
+    seed: int = 42
+    output_dir: str = "outputs"
+    wandb_name: Optional[str] = None
+    save_checkpoint: bool = True
+    
+    # Resume configuration
+    resume_from: Optional[str] = None
+
 # Muon optimizer (copied from train_gpt.py)
 @torch.compile
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int) -> torch.Tensor:
@@ -165,43 +203,110 @@ def create_buckets(params, bucket_size_mb=25):
 
     return buckets
 
-@dataclass
-class TrainingConfig:
-    # Model configuration
-    model_config: DictConfig
+def load_from_checkpoint(checkpoint_path, model, optimizer_adam, optimizer_muon, device, rank):
+    """Load model and optimizers from external checkpoint directory."""
+    checkpoint_path = Path(checkpoint_path)
     
-    # Training configuration
-    train_num_steps: int = 10000
-    train_bs: int = 8
-    eval_bs: int = 8
-    eval_every: int = 1000
-    grad_accumulate: int = 1
+    # Try to load from model_best.pt first, then model.pt
+    checkpoint_file = None
+    for filename in ['model_best.pt', 'model.pt']:
+        potential_path = checkpoint_path / filename
+        if potential_path.exists():
+            checkpoint_file = potential_path
+            break
     
-    # Data configuration
-    train_bin_pattern: str = "data/train_*.bin"
-    val_bin_pattern: str = "data/val_*.bin"
-    total_tokens: int = 100_000_000_000  # 100B tokens
+    if checkpoint_file is None:
+        raise FileNotFoundError(f"No checkpoint file (model_best.pt or model.pt) found in {checkpoint_path}")
     
-    # Optimization configuration
-    learning_rate: float = 1e-4
-    adam_betas: Tuple[float, float] = (0.9, 0.95)
-    adam_weight_decay: float = 0.1
-    adam_eps: float = 1e-8
-    muon_lr: float = 0.02
-    muon_momentum: float = 0.95
+    if rank == 0:
+        print(f"Loading checkpoint from: {checkpoint_file}")
     
-    # VAE configuration
-    kld_weight: float = 1e-4
-    kld_annealing_steps: int = 2000
+    # Load checkpoint data
+    data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
     
-    # Logging configuration
-    seed: int = 42
-    output_dir: str = "outputs"
-    wandb_name: Optional[str] = None
-    save_checkpoint: bool = True
+    # Unwrap model if it's compiled or wrapped
+    unwrapped_model = model
+    if hasattr(model, '_orig_mod'):
+        unwrapped_model = model._orig_mod
     
-    # Resume configuration
-    resume_from: Optional[str] = None
+    # Load model state
+    if 'model' in data:
+        unwrapped_model.load_state_dict(data['model'])
+        if rank == 0:
+            print("Successfully loaded model weights from 'model' key.")
+    else:
+        # Handle case where checkpoint is just the state_dict
+        unwrapped_model.load_state_dict(data)
+        if rank == 0:
+            print("Loaded model weights from raw state_dict.")
+    
+    # Initialize step and best_val_loss
+    step = 0
+    best_val_loss = float('inf')
+    
+    # Load training state
+    if 'step' in data:
+        step = data['step']
+        if rank == 0:
+            print(f"Resuming from step: {step}")
+    
+    if 'opt' in data:
+        # For backwards compatibility - single optimizer
+        optimizer_adam.load_state_dict(data['opt'])
+        if rank == 0:
+            print("Loaded optimizer state from 'opt' key.")
+    elif 'optimizer_adam' in data and 'optimizer_muon' in data:
+        # New format - separate optimizers
+        optimizer_adam.load_state_dict(data['optimizer_adam'])
+        optimizer_muon.load_state_dict(data['optimizer_muon'])
+        if rank == 0:
+            print("Loaded separate optimizer states.")
+    elif 'optimizer_adam' in data:
+        optimizer_adam.load_state_dict(data['optimizer_adam'])
+        if rank == 0:
+            print("Loaded Adam optimizer state.")
+    
+    if 'best_val_loss' in data:
+        best_val_loss = data['best_val_loss']
+        if rank == 0:
+            print(f"Best validation loss: {best_val_loss}")
+    
+    if rank == 0:
+        print("Checkpoint loading complete.")
+    
+    return step, best_val_loss
+
+def handle_checkpoint_config(cfg: TrainingConfig, rank: int):
+    """Handle checkpoint loading and config merging (similar to train_lvae.py)."""
+    # Handle checkpoint loading: if loading from external checkpoint, use its config for model creation
+    if cfg.resume_from is not None:
+        checkpoint_path = Path(cfg.resume_from)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+        
+        config_path = checkpoint_path / 'config.yaml'
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found at {config_path}")
+        
+        if rank == 0:
+            print(f"Loading config from checkpoint: {config_path}")
+        
+        # Load the checkpoint config and use its model config
+        checkpoint_cfg = OmegaConf.load(config_path)
+        
+        # Use the model config from checkpoint, but keep other configs from current run
+        if 'model' in checkpoint_cfg:
+            cfg.model_config = checkpoint_cfg.model  # Changed to model_config
+        else:
+            # If checkpoint config doesn't have model key, use the whole config as model config
+            cfg.model_config = checkpoint_cfg  # Changed to model_config
+        
+        if rank == 0:
+            print("Using model architecture from checkpoint config")
+    
+    return cfg
+
+
 
 def print0(s, logfile=None, console=False):
     """Print only from rank 0"""
@@ -223,6 +328,9 @@ def main(cfg: TrainingConfig):
     dist.barrier()
     master_process = (rank == 0)
     
+    # Handle checkpoint config loading
+    cfg = handle_checkpoint_config(cfg, rank)
+    
     # Set seeds
     set_seeds(cfg.seed)
     
@@ -230,14 +338,14 @@ def main(cfg: TrainingConfig):
     logfile = None
     if master_process:
         # Create unique directory for this run
-        cfg_str = str(cfg)
+        cfg_str = OmegaConf.to_yaml(cfg.model_config, resolve=True)  # Changed to model_config
         cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
         results_folder = Path(cfg.output_dir) / cfg_hash
         results_folder.mkdir(parents=True, exist_ok=True)
         
         # Save config
         with open(results_folder / "config.yaml", "w") as f:
-            f.write(OmegaConf.to_yaml(cfg.model_config, resolve=True))
+            f.write(OmegaConf.to_yaml(cfg.model_config, resolve=True))  # Changed to model_config
         
         # Setup wandb
         run_id = uuid.uuid4()
@@ -247,14 +355,14 @@ def main(cfg: TrainingConfig):
             project="lvae-distributed",
             name=f"{cfg.wandb_name}-{cfg_hash[:8]}" if cfg.wandb_name else f"run-{cfg_hash[:8]}",
             dir=str(results_folder),
-            config=OmegaConf.to_container(cfg.model_config, resolve=True)
+            config=OmegaConf.to_container(cfg.model_config, resolve=True)  # Changed to model_config
         )
         
         print0(f"Results folder: {results_folder}", logfile, console=True)
         print0(f"Logfile: {logfile}", logfile, console=True)
     
     # Create model and tokenizer
-    model, tokenizer = get_latent_vae_tokenizer(cfg.model_config)
+    model, tokenizer = get_latent_vae_tokenizer(cfg.model_config)  # Changed to model_config
     model = model.cuda()
     
     # Broadcast model parameters to all ranks
@@ -354,22 +462,59 @@ def main(cfg: TrainingConfig):
             bucket_ready_count[i] = 0
             bucket_handles[i] = None
     
-    # Setup data loaders
-    train_loader = get_dataloader_lvae_bin(
-        cfg, 
-        cfg.train_bin_pattern, 
-        rank, 
-        world_size,
-        tokenizer=tokenizer
-    )
+    # Load checkpoint if resuming
+    step = 0
+    best_val_loss = float('inf')
     
-    val_loader = get_dataloader_lvae_bin(
-        cfg, 
-        cfg.val_bin_pattern, 
-        rank, 
-        world_size,
-        tokenizer=tokenizer
-    )
+    if cfg.resume_from is not None:
+        if master_process:
+            print0(f"Loading checkpoint from: {cfg.resume_from}", logfile, console=True)
+        
+        step, best_val_loss = load_from_checkpoint(
+            cfg.resume_from, model, optimizer_adam, optimizer_muon, device, rank
+        )
+    
+    # Setup data loaders AFTER checkpoint loading so we can wind to correct position
+    if cfg.resume_from is not None and step > 0:
+        # We're resuming training, so wind the data generator to the correct position
+        if master_process:
+            print0(f"Winding data generator to step {step}", logfile, console=True)
+        
+        # Wind the training data generator
+        train_loader = wind_data_generator(
+            cfg,
+            cfg.train_bin_pattern,
+            step,
+            rank,
+            world_size,
+            tokenizer=tokenizer
+        )
+        
+        # For validation, we don't need to wind (always start from beginning)
+        val_loader = get_dataloader_lvae_bin(
+            cfg, 
+            cfg.val_bin_pattern, 
+            rank, 
+            world_size,
+            tokenizer=tokenizer
+        )
+    else:
+        # Normal startup, create fresh data loaders
+        train_loader = get_dataloader_lvae_bin(
+            cfg, 
+            cfg.train_bin_pattern, 
+            rank, 
+            world_size,
+            tokenizer=tokenizer
+        )
+        
+        val_loader = get_dataloader_lvae_bin(
+            cfg, 
+            cfg.val_bin_pattern, 
+            rank, 
+            world_size,
+            tokenizer=tokenizer
+        )
     
     # Setup learning rate scheduling
     def get_lr(step: int):
@@ -388,65 +533,44 @@ def main(cfg: TrainingConfig):
         else:
             return cfg.kld_weight
     
-    # Load checkpoint if resuming
-    step = 0
-    best_val_loss = float('inf')
-    
-    if cfg.resume_from is not None:
-        if master_process:
-            print0(f"Loading checkpoint from: {cfg.resume_from}", logfile, console=True)
-        
-        checkpoint = torch.load(cfg.resume_from, map_location=device)
-        model.load_state_dict(checkpoint['model'])
-        optimizer_adam.load_state_dict(checkpoint['optimizer_adam'])
-        optimizer_muon.load_state_dict(checkpoint['optimizer_muon'])
-        step = checkpoint['step']
-        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        
-        # Wind data loader to correct position
-        train_loader = wind_data_generator(
-            cfg,
-            cfg.train_bin_pattern,
-            step,
-            rank,
-            world_size,
-            tokenizer=tokenizer
-        )
-    
     # Compile model
     model = torch.compile(model, dynamic=False)
     
-    # Warmup kernels
-    if master_process:
-        print0("Warming up kernels...", logfile, console=True)
-    
-    warmup_steps = 3
-    initial_state = dict(
-        model=copy.deepcopy(model.state_dict()),
-        optimizer_adam=copy.deepcopy(optimizer_adam.state_dict()),
-        optimizer_muon=copy.deepcopy(optimizer_muon.state_dict())
-    )
-    
-    for _ in range(warmup_steps):
-        batch = next(train_loader)
-        batch = {k: v.cuda() for k, v in batch.items()}
+    # Warmup kernels - but skip if we're resuming from a checkpoint
+    if cfg.resume_from is None:
+        if master_process:
+            print0("Warming up kernels...", logfile, console=True)
         
-        losses = model(batch["input_ids"], attn_mask=batch["attention_mask"])
-        loss = losses['reconstruction_loss'] + get_annealed_kld_weight(0) * losses['kld_loss']
-        loss.backward()
+        warmup_steps = 3
+        initial_state = dict(
+            model=copy.deepcopy(model.state_dict()),
+            optimizer_adam=copy.deepcopy(optimizer_adam.state_dict()),
+            optimizer_muon=copy.deepcopy(optimizer_muon.state_dict())
+        )
         
-        wait_for_gradients()
+        for _ in range(warmup_steps):
+            batch = next(train_loader)
+            batch = {k: v.cuda() for k, v in batch.items()}
+            
+            losses = model(batch["input_ids"], attn_mask=batch["attention_mask"])
+            loss = losses['reconstruction_loss'] + get_annealed_kld_weight(0) * losses['kld_loss']
+            loss.backward()
+            
+            wait_for_gradients()
+            
+            for opt in optimizers:
+                opt.step()
+            
+            model.zero_grad(set_to_none=True)
         
-        for opt in optimizers:
-            opt.step()
-        
-        model.zero_grad(set_to_none=True)
-    
-    # Restore initial state
-    model.load_state_dict(initial_state["model"])
-    optimizer_adam.load_state_dict(initial_state["optimizer_adam"])
-    optimizer_muon.load_state_dict(initial_state["optimizer_muon"])
-    del initial_state
+        # Restore initial state
+        model.load_state_dict(initial_state["model"])
+        optimizer_adam.load_state_dict(initial_state["optimizer_adam"])
+        optimizer_muon.load_state_dict(initial_state["optimizer_muon"])
+        del initial_state
+    else:
+        if master_process:
+            print0("Skipping kernel warmup (resuming from checkpoint)", logfile, console=True)
     
     # Training loop
     if master_process:
@@ -503,7 +627,7 @@ def main(cfg: TrainingConfig):
             
             if master_process:
                 # Calculate progress
-                tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * cfg.model_config.max_seq_len
+                tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * cfg.model_config.max_seq_len  # Changed to model_config
                 epoch = tokens_processed / cfg.total_tokens
                 
                 print0(f"step:{step}/{cfg.train_num_steps} val_loss:{val_loss:.4f} "
@@ -523,9 +647,14 @@ def main(cfg: TrainingConfig):
                 
                 # Save checkpoint
                 if cfg.save_checkpoint:
+                    # Get the unwrapped model for saving
+                    unwrapped_model = model
+                    if hasattr(model, '_orig_mod'):
+                        unwrapped_model = model._orig_mod
+                    
                     checkpoint = {
                         'step': step,
-                        'model': model.state_dict(),
+                        'model': unwrapped_model.state_dict(),  # Save unwrapped model state
                         'optimizer_adam': optimizer_adam.state_dict(),
                         'optimizer_muon': optimizer_muon.state_dict(),
                         'best_val_loss': best_val_loss,
@@ -632,7 +761,7 @@ def main(cfg: TrainingConfig):
         
         # Logging
         if master_process and step % 50 == 0:
-            tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * cfg.model_config.max_seq_len
+            tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * cfg.model_config.max_seq_len  # Changed to model_config
             epoch = tokens_processed / cfg.total_tokens
             
             approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
