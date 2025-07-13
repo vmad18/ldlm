@@ -281,7 +281,7 @@ class VariationalAutoEncoder(nn.Module):
     def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
         recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
 
-        kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).mean()
 
         total_loss = recon_loss + kld_loss
         
