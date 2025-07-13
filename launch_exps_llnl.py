@@ -5,8 +5,8 @@ from itertools import product, chain
 # LIST_CFGS = True
 LIST_CFGS = False
 
-# WRITE_ONLY = True
-WRITE_ONLY = False
+WRITE_ONLY = True
+# WRITE_ONLY = False
 
 LAUNCHER_FILEPATH = "/p/vast1/$USER/llnl-tools/launch_tuo.py"
 
@@ -52,8 +52,10 @@ exp_list = [
     # ["main_lvae.py", "", 1, 1, 64, 12, 512, 1e-4],
     # ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
     # ["main_lvae.py", "", 1, 1, 128, 6, 512, 1e-4],
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 64, 1, 512, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 64, 1, 512, 1e-4],
     # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 64, 1, 512, 1e-4],
+    # ["run_distributed_training_no_hydra.py", "", 1, 4, 64, 1, 512, 1e-4],
+    ["run_distributed_training_no_hydra.py", "", 2, 4, 64, 1, 512, 1e-4],
 ]
 
 # add an additional sweep for each prev cfg over somthing like lr or seed etc.
@@ -88,14 +90,16 @@ for exp in final_exp_list:
     # mod lr
     lr_name_str = f"lr{lr:.0e}"
     # lr_cfg_string = f" training.optimizer.learning_rate={lr}"
-    lr_cfg_string = f" learning_rate={lr}"
+    # lr_cfg_string = f" learning_rate={lr}"
+    lr_cfg_string = f" --learning_rate={lr}"
     cli_args += lr_cfg_string
 
     # mod bsz and seq len
     wbsz = nodes * gpn * mbsz * accum
     bsz_name_str = f"mb{mbsz}-acc{accum}-wb{wbsz}-seq{seq_len}"
     # train_bsz_cfg_string = f" training.train_bs={mbsz} training.grad_accumulate={accum} model.max_seq_len={seq_len}"
-    train_bsz_cfg_string = f" train_bs={mbsz} grad_accumulate={accum} model.max_seq_len={seq_len}"
+    # train_bsz_cfg_string = f" train_bs={mbsz} grad_accumulate={accum} model.max_seq_len={seq_len}"
+    train_bsz_cfg_string = f" --train_bs={mbsz} --grad_accumulate={accum} --max_seq_len={seq_len}"
     cli_args += train_bsz_cfg_string
 
     # mod more things 
