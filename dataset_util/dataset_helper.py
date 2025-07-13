@@ -575,9 +575,17 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
     import glob
     
     # Calculate total tokens consumed up to this step
-    train_bs = cfg.training.train_bs
-    grad_accumulate = cfg.training.grad_accumulate
-    max_seq_len = cfg.model.max_seq_len
+    # Handle both old nested config structure and new flattened structure
+    if hasattr(cfg, 'training'):
+        # Old nested structure
+        train_bs = cfg.training.train_bs
+        grad_accumulate = cfg.training.grad_accumulate
+        max_seq_len = cfg.model.max_seq_len
+    else:
+        # New flattened structure
+        train_bs = cfg.train_bs
+        grad_accumulate = cfg.grad_accumulate
+        max_seq_len = cfg.model_config.max_seq_len
     
     # Total tokens consumed = step * batch_size * grad_accumulate * world_size * seq_len
     total_tokens_consumed = step * train_bs * grad_accumulate * world_size * max_seq_len
@@ -675,12 +683,22 @@ def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: i
     Returns:
         Generator that yields batches
     """
+    # Handle both old nested config structure and new flattened structure
+    if hasattr(cfg, 'training'):
+        # Old nested structure
+        batch_size = cfg.training.train_bs
+        sequence_length = cfg.model.max_seq_len
+    else:
+        # New flattened structure
+        batch_size = cfg.train_bs
+        sequence_length = cfg.model_config.max_seq_len
+    
     return distributed_data_generator(
         filename_pattern=filename_pattern,
-        batch_size=cfg.training.train_bs,
+        batch_size=batch_size,
         rank=rank,
         world_size=world_size,
-        sequence_length=cfg.model.max_seq_len,
+        sequence_length=sequence_length,
         tokenizer=tokenizer,
         start_file_idx=start_file_idx
     )
@@ -700,12 +718,22 @@ def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_siz
     Returns:
         Generator that yields batches
     """
+    # Handle both old nested config structure and new flattened structure
+    if hasattr(cfg, 'training'):
+        # Old nested structure
+        batch_size = cfg.training.eval_bs
+        sequence_length = cfg.model.max_seq_len
+    else:
+        # New flattened structure
+        batch_size = cfg.eval_bs
+        sequence_length = cfg.model_config.max_seq_len
+    
     return distributed_data_generator(
         filename_pattern=filename_pattern,
-        batch_size=cfg.training.eval_bs,
+        batch_size=batch_size,
         rank=rank,
         world_size=world_size,
-        sequence_length=cfg.model.max_seq_len,
+        sequence_length=sequence_length,
         tokenizer=tokenizer,
         start_file_idx=start_file_idx
     )
