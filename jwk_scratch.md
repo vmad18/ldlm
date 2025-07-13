@@ -190,3 +190,14 @@ python /p/lustre5/$USER/llnl-tools/launch_tuo.py \
 Okay I think we're good on the new data (at least for N1n1).
 
 # next, tune the hparams to make it go brr
+
+we did not in fact, make it go brr
+
+# auto sweep in launch_exps_llnl.py
+
+found a reasonable batch size for single gpu
+
+# testing distributed lvae training
+
+having to rip things out and print to figure out whats up, make sure to reconcile from main eventually
+

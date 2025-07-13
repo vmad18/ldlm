@@ -18,14 +18,14 @@ RCCL_CFG = "rdzv-lbann"
 # WANDB_OFFLINE = "False"
 WANDB_OFFLINE = "True"
 
-# QOS = "pdebug"
-QOS = "pbatch"
+QOS = "pdebug"
+# QOS = "pbatch"
 
 # BANK = "guests"
 BANK = "effml"
 
-# TIME_LIMIT = 10  # in minutes
-TIME_LIMIT = 1440 
+TIME_LIMIT = 59  # in minutes
+# TIME_LIMIT = 1440 
 
 REPETITIONS = 1
 # REPETITIONS = 3
@@ -36,9 +36,12 @@ BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
 # BASE_RUN_NAME = f"test_sweep"
 # BASE_RUN_NAME = f"train_lvae_100b_debug"
-BASE_RUN_NAME = f"train_lvae_100b"
+# BASE_RUN_NAME = f"train_lvae_100b"
+BASE_RUN_NAME = f"train_lvae_dist_debug"
+# BASE_RUN_NAME = f"train_lvae_dist"
 
-INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
+# INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
+INVOCATION_PREAMBLE = "source .venv/bin/activate && python"
 
 # Cfgs
 # gpn = gpus per node
@@ -47,8 +50,10 @@ INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index
 exp_list = [
     # ["main_lvae.py", "", 1, 1, 48, 16, 512, 1e-4],
     # ["main_lvae.py", "", 1, 1, 64, 12, 512, 1e-4],
-    ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
+    # ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
     # ["main_lvae.py", "", 1, 1, 128, 6, 512, 1e-4],
+    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 64, 1, 512, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 64, 1, 512, 1e-4],
 ]
 
 # add an additional sweep for each prev cfg over somthing like lr or seed etc.
@@ -82,13 +87,15 @@ for exp in final_exp_list:
 
     # mod lr
     lr_name_str = f"lr{lr:.0e}"
-    lr_cfg_string = f" training.optimizer.learning_rate={lr}"
+    # lr_cfg_string = f" training.optimizer.learning_rate={lr}"
+    lr_cfg_string = f" learning_rate={lr}"
     cli_args += lr_cfg_string
 
     # mod bsz and seq len
     wbsz = nodes * gpn * mbsz * accum
     bsz_name_str = f"mb{mbsz}-acc{accum}-wb{wbsz}-seq{seq_len}"
-    train_bsz_cfg_string = f" training.train_bs={mbsz} training.grad_accumulate={accum} model.max_seq_len={seq_len}"
+    # train_bsz_cfg_string = f" training.train_bs={mbsz} training.grad_accumulate={accum} model.max_seq_len={seq_len}"
+    train_bsz_cfg_string = f" train_bs={mbsz} grad_accumulate={accum} model.max_seq_len={seq_len}"
     cli_args += train_bsz_cfg_string
 
     # mod more things 

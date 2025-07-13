@@ -20,6 +20,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from autoencoder.train_lvae_distributed import main, TrainingConfig
 
+print(f"Importing complete in run_distributed_training.py", flush=True)
+
 def create_training_config(cfg: DictConfig) -> TrainingConfig:
     """Create TrainingConfig from Hydra configuration"""
     
@@ -46,10 +48,12 @@ def create_training_config(cfg: DictConfig) -> TrainingConfig:
         kld_weight=cfg.kld_weight,
         kld_annealing_steps=cfg.get('kld_annealing_steps', 2000),
         seed=cfg.get('seed', 42),
+        log_step_interval=cfg.get('log_step_interval', 50),
         output_dir=cfg.get('output_dir', 'outputs'),
         wandb_name=cfg.get('wandb_name', None),
         save_checkpoint=cfg.get('save_checkpoint', True),
-        resume_from=cfg.get('resume_from', None)
+        resume_from=cfg.get('resume_from', None),
+        per_process_vram_ratio=cfg.get('per_process_vram_ratio', None),
     )
     
     return training_cfg
@@ -57,6 +61,8 @@ def create_training_config(cfg: DictConfig) -> TrainingConfig:
 @hydra.main(version_base=None, config_path="conf", config_name="train_lvae_dist")
 def main_script(cfg: DictConfig) -> None:
     """Main script entry point with Hydra configuration"""
+
+    print(f"Top of main in run_distributed_training.py", flush=True)
     
     # Check if we're in a distributed environment
     if "RANK" not in os.environ:
