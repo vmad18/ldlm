@@ -39,7 +39,7 @@ print("Importing complete in train_lvae_distributed.py", flush=True)
 class TrainingConfig:
     # Model configuration
     model_config: DictConfig  # Changed from model to model_config
-    
+
     # Training configuration
     train_num_steps: int = 10000
     train_bs: int = 8
@@ -334,12 +334,13 @@ def main(cfg: TrainingConfig):
     # 3. else, set everything as if we are in single-GPU mode since it's not clear what's going on.
     rank = int(os.getenv("RANK", os.getenv("SLURM_PROCID", 0)))
     world_size = int(os.getenv("WORLD_SIZE", os.getenv("SLURM_NTASKS", 1)))
-    master_process = (rank == 0)
-    # assert torch.cuda.is_available()
     local_rank = int(os.getenv("LOCAL_RANK")) if "LOCAL_RANK" in os.environ else rank % os.getenv("SLURM_NTASKS_PER_NODE", 1)
-    device = torch.device("cuda", local_rank)
+    print(f"About to initialize distributed on rank ({rank}/{world_size}) as with local_rank={local_rank}, rdzv through {os.getenv("MASTER_ADDR", "null_badbad")}:{os.getenv("MASTER_PORT", "null_badbad")}", flush=True)
+    # assert torch.cuda.is_available()
+    master_process = (rank == 0)
+    device = torch.device(f"cuda:{local_rank}") #, local_rank)
 
-    print(f"About to initialize distributed on rank ({rank}/{world_size}) as device={device}")
+    # print(f"About to initialize distributed on rank ({rank}/{world_size}) as device={device}")
     
     # first synchronous operation that must execute properly
     # dist.init_process_group(backend="nccl", device_id=device)
