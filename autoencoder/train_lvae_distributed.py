@@ -318,15 +318,50 @@ def print0(s, logfile=None, console=False):
                 print(s, file=f)
 
 def main(cfg: TrainingConfig):
+    print(f"Top of main in train_lvae_distributed.py", flush=True)
+
     # Initialize distributed training
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    assert torch.cuda.is_available()
-    device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
-    torch.cuda.set_device(device)
-    dist.init_process_group(backend="nccl", device_id=device)
-    dist.barrier()
+    # The convention is to:
+    # 1. check the RANK, WORLD_SIZE, and LOCAL_RANK environment variables. launch_tuo.py and torchrun set these.
+    # 2. if those aren't set, fall back to SLURM vars as this could still be run using vanilla srun in theory.
+    # 3. else, set everything as if we are in single-GPU mode since it's not clear what's going on.
+    rank = int(os.getenv("RANK", os.getenv("SLURM_PROCID", 0)))
+    world_size = int(os.getenv("WORLD_SIZE", os.getenv("SLURM_NTASKS", 1)))
     master_process = (rank == 0)
+    # assert torch.cuda.is_available()
+    local_rank = int(os.getenv("LOCAL_RANK")) if "LOCAL_RANK" in os.environ else rank % os.getenv("SLURM_NTASKS_PER_NODE", 1)
+    device = torch.device("cuda", local_rank)
+
+    print(f"About to initialize distributed on rank ({rank}/{world_size}) as device={device}")
+    
+    # first synchronous operation that must execute properly
+    # dist.init_process_group(backend="nccl", device_id=device)
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        device_id=device,  # this immediately forms the NCCL communicator
+    )
+    # Must this come after?
+    torch.cuda.set_device(device)
+
+    # pre-barrier log each ranks setup
+    if dist.is_initialized():
+        print(f"Distributed training initialized on rank ({rank}/{world_size}) as device={device}")
+    # wait for all ranks
+    # dist.barrier()
+    torch.distributed.barrier() # barrier not barriering?
+    # log "success" message (still possible topo is misconfigured but no errors yet)
+    print0("Distributed training setup successful. All ranks initialized correctly.", console=True)
+
+    # On APUs like MI300A and GH200, gpu and cpu memory are shared and so both types of allocations
+    # fight for the same space. Tends to make things behave/fail better when you cap useable vram.
+    # if cfg.per_process_vram_ratio is not None:
+    #     assert (
+    #         cfg.per_process_vram_ratio > 0.0 and cfg.per_process_vram_ratio < 1.0
+    #     ), f"Invalid per_process_vram_ratio: {cfg.per_process_vram_ratio}, must be in (0.0, 1.0)"
+    #     torch.cuda.set_per_process_memory_fraction(cfg.per_process_vram_ratio)
+    #     print(f"per_process_vram_ratio set to: {cfg.per_process_vram_ratio}")
     
     # Handle checkpoint config loading
     cfg = handle_checkpoint_config(cfg, rank)
@@ -341,6 +376,14 @@ def main(cfg: TrainingConfig):
         cfg_str = OmegaConf.to_yaml(cfg.model_config, resolve=True)  # Changed to model_config
         cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
         results_folder = Path(cfg.output_dir) / cfg_hash
+        
+        # Check if we should auto-resume from existing checkpoint
+        if cfg.resume_from is None and results_folder.exists():
+            potential_checkpoint = results_folder / "model_best.pt"
+            if potential_checkpoint.exists():
+                cfg.resume_from = str(results_folder)
+                print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
+        
         results_folder.mkdir(parents=True, exist_ok=True)
         
         # Save config
