@@ -10,3 +10,9 @@ outputs/
 wandb/
 Report/
 *.sh
+
+# jwk: maybe I'm missing some uv boilerplate in bashrc or smthn
+.venv
+
+# mi installer
+!install*.sh

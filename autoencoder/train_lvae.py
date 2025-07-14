@@ -123,7 +123,16 @@ class Trainer(object):
         self.cfg = cfg
 
         self.best_val_loss = float('inf')
-        self.num_samples = cfg.data.num_samples
+        # self.num_samples = cfg.data.num_samples # FIXME make this flexibly optional
+
+        # On APUs like MI300A and GH200, gpu and cpu memory are shared and so both types of allocations
+        # fight for the same space. Tends to make thing behave/fail better when you cap useable vram
+        if hasattr(self.cfg, "per_process_vram_ratio"):
+            assert (
+                self.cfg.per_process_vram_ratio > 0.0 and self.cfg.per_process_vram_ratio < 1.0
+            ), f"Invalid per_process_vram_ratio: {self.cfg.per_process_vram_ratio}, must be in (0.0, 1.0)"
+            torch.cuda.set_per_process_memory_fraction(self.cfg.per_process_vram_ratio)
+            print(f"per_process_vram_ratio set to: {self.cfg.per_process_vram_ratio}")
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
@@ -131,6 +140,20 @@ class Trainer(object):
             log_with="wandb",
             kwargs_handlers=[ddp_kwargs]
         )
+
+        assert self.accelerator.num_processes == 1, "Multi-gpu training is no bueno rn"
+        print(
+            f"Accelerator (RANK: {self.accelerator.process_index}, "
+            f"LOCAL_RANK: {self.accelerator.local_process_index}, "
+            f"WORLD_SIZE: {self.accelerator.num_processes}) - "
+            f"Mixed Precision: {self.accelerator.mixed_precision}, "
+            f"Device: {self.accelerator.device}, "
+        )
+        # these have no setters and are not constructor args (straight to jail)
+        # self.accelerator.local_process_index = os.getenv("LOCAL_RANK", 0)
+        # self.accelerator.process_index = os.getenv("RANK", 0)
+        # self.accelerator.num_processes = os.getenv("WOLRD_SIZE", 1)
+        # so we're gonna ignore them
 
         self.num_dev = self.accelerator.num_processes
 
@@ -237,7 +260,7 @@ class Trainer(object):
             if self.accelerator.is_main_process:
                 self.accelerator.print("Using traditional dataset loading")
             
-            self.dataset = get_dataset(self.cfg.data.dataset_name, shard_size=self.cfg.data.num_samples)
+            self.dataset = get_dataset(self.cfg.data.dataset_name) #, shard_size=self.cfg.data.num_samples) # FIXME make this flexibly optional
 
             if self.cfg.eval:
                 self.dataset["train"] = self.dataset["train"].select(range(1000))
@@ -267,9 +290,15 @@ class Trainer(object):
 
         self.step = 0
 
-        self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
-            self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
-        
+        if self.use_bin_files:
+            # in this case, dataset parallelization is handled by the dataset/loader constructors
+            # so having accelerate parallelize them further would be incorrect
+            self.model, self.opt, self.lr_scheduler = self.accelerator.prepare(
+                self.model, self.opt, lr_scheduler)
+        else:
+            self.model, self.opt, self.dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
+                self.model, self.opt, self.dataloader, lr_scheduler, self.val_dataloader)
+
         # Handle checkpoint loading/resuming
         if self.cfg.model.get('latent_model_path') is not None:
             if self.accelerator.is_main_process:
@@ -525,6 +554,11 @@ class Trainer(object):
 
         # Get one batch for warm-up
         warmup_data = {k: v.to(device) for k, v in next(self.data_iter).items()}
+
+        # log the shape of the warmup batch
+        print(f'input_ids.shape: {warmup_data["input_ids"].shape}')
+        # and the leading tokens of the leading rows as an indication of whether they're distributed or not
+        print(f'input_ids.shape: {warmup_data["input_ids"][:4,:10]}')
         
         # Full forward, backward, and optimizer step to trigger compilation
         with accelerator.autocast():

@@ -129,11 +129,16 @@ class LatentVAEModel(nn.Module):
 
 
 def get_latent_vae_tokenizer(model_cfg) -> Tuple[LatentVAEModel, PreTrainedTokenizerBase]:
-    tokenizer = GPT2Tokenizer.from_pretrained(model_cfg.tokenizer_name)
     
-    # TODO: do we need this?
-    # if tokenizer.pad_token is None:
-    #     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    if "gpt2" in model_cfg.tokenizer_name:
+        tokenizer = GPT2Tokenizer.from_pretrained(model_cfg.tokenizer_name)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_cfg.tokenizer_name)
+
+    
+    # TODO: do we need this? jwk: according to stacktrace later, yes? 
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     
     vae = LatentVAEModel(
         vocab_size = len(tokenizer),

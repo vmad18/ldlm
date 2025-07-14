@@ -47,8 +47,10 @@ def create_training_config(
     grad_accumulate: int = 1,
     
     # Data params
-    train_bin_pattern: str = "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin",
-    val_bin_pattern: str = "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin",
+    # train_bin_pattern: str = "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin",
+    # val_bin_pattern: str = "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin",
+    train_bin_pattern: str = "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin",
+    val_bin_pattern: str = "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin",
     total_tokens: int = 100_000_000_000,
     
     # Optimization params
@@ -65,6 +67,7 @@ def create_training_config(
     
     # Logging params
     seed: int = 42,
+    log_step_interval: int = 1,
     output_dir: str = "outputs",
     wandb_name: str = None,
     save_checkpoint: bool = True,
@@ -79,6 +82,8 @@ def create_training_config(
     num_latents: int = None,
     dim_head: int = None,
     num_layers: int = None,
+
+    per_process_vram_ratio: float = None
 ):
     """Create the full training configuration."""
     
@@ -143,9 +148,9 @@ def parse_args():
                         help="Gradient accumulation steps")
     
     # Data arguments
-    parser.add_argument("--train_bin_pattern", type=str, default="/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin",
+    parser.add_argument("--train_bin_pattern", type=str, default="/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin",
                         help="Pattern for training data files")
-    parser.add_argument("--val_bin_pattern", type=str, default="/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin",
+    parser.add_argument("--val_bin_pattern", type=str, default="/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin",
                         help="Pattern for validation data files")
     parser.add_argument("--total_tokens", type=int, default=100_000_000_000,
                         help="Total number of tokens in dataset")
@@ -183,6 +188,8 @@ def parse_args():
     # Logging arguments
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
+    parser.add_argument("--log_step_interval", type=int, default=1,
+                        help="Log every N steps")
     parser.add_argument("--output_dir", type=str, default="outputs",
                         help="Output directory for checkpoints and logs")
     parser.add_argument("--wandb_name", type=str, default=None,
@@ -193,6 +200,10 @@ def parse_args():
     # Resume arguments
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to checkpoint to resume from")
+
+    # VRAM arguments
+    parser.add_argument("--per_process_vram_ratio", type=float, default=None,
+                        help="VRAM ratio per process (if applicable)")
     
     return parser.parse_args()
 
@@ -235,12 +246,15 @@ def main_entry():
         
         # Logging params
         seed=args.seed,
+        log_step_interval=args.log_step_interval,
         output_dir=args.output_dir,
         wandb_name=args.wandb_name,
         save_checkpoint=not args.no_save_checkpoint,
         
         # Resume params
         resume_from=args.resume_from,
+
+        per_process_vram_ratio=args.per_process_vram_ratio
     )
     
     # Print configuration for verification

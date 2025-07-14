@@ -24,7 +24,7 @@ from torch.optim import AdamW
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 import wandb
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # VAE imports - changed to absolute imports
 from autoencoder.latent_vae import LatentVAEModel, get_latent_vae_tokenizer
@@ -33,17 +33,20 @@ from dataset_util.dataset_helper import get_dataloader_lvae_bin, wind_data_gener
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+print("Importing complete in train_lvae_distributed.py", flush=True)
+
 @dataclass
 class TrainingConfig:
     # Model configuration
     model_config: DictConfig  # Changed from model to model_config
-    
+
     # Training configuration
     train_num_steps: int = 10000
     train_bs: int = 8
     eval_bs: int = 8
     eval_every: int = 1000
     grad_accumulate: int = 1
+    compile_model: bool = True
     
     # Data configuration
     train_bin_pattern: str = "data/train_*.bin"
@@ -64,12 +67,16 @@ class TrainingConfig:
     
     # Logging configuration
     seed: int = 42
+    log_step_interval: int = 1
     output_dir: str = "outputs"
     wandb_name: Optional[str] = None
     save_checkpoint: bool = True
     
     # Resume configuration
     resume_from: Optional[str] = None
+    
+    # Cluster shenanigans
+    per_process_vram_ratio: Optional[float] = None # eg. 0.8, For APUs like MI300A and GH200
 
 # Muon optimizer (copied from train_gpt.py)
 @torch.compile
@@ -318,6 +325,7 @@ def print0(s, logfile=None, console=False):
                 print(s, file=f)
 
 def main(cfg: TrainingConfig):
+
     print(f"Top of main in train_lvae_distributed.py", flush=True)
 
     # Initialize distributed training
@@ -327,41 +335,40 @@ def main(cfg: TrainingConfig):
     # 3. else, set everything as if we are in single-GPU mode since it's not clear what's going on.
     rank = int(os.getenv("RANK", os.getenv("SLURM_PROCID", 0)))
     world_size = int(os.getenv("WORLD_SIZE", os.getenv("SLURM_NTASKS", 1)))
-    master_process = (rank == 0)
-    # assert torch.cuda.is_available()
     local_rank = int(os.getenv("LOCAL_RANK")) if "LOCAL_RANK" in os.environ else rank % os.getenv("SLURM_NTASKS_PER_NODE", 1)
-    device = torch.device("cuda", local_rank)
+    master_process = (rank == 0)
 
-    print(f"About to initialize distributed on rank ({rank}/{world_size}) as device={device}")
-    
-    # first synchronous operation that must execute properly
-    # dist.init_process_group(backend="nccl", device_id=device)
+    assert torch.cuda.is_available()
+    device = torch.device(f"cuda:{local_rank}")
+
+    # Dist init is a synchronous operation that must execute properly.
+    os.environ["TORCH_DIST_INIT_BARRIER"] = "1"  # ensure barrier is used for initialization
+
     dist.init_process_group(
         backend="nccl",
         rank=rank,
         world_size=world_size,
-        device_id=device,  # this immediately forms the NCCL communicator
+        device_id=device,  # passing this immediately forms the NCCL communicator.
+        timeout=timedelta(minutes=5),
     )
-    # Must this come after?
+    # _Must_ this come after?
+    # idk, @jog did it this way back in summer of 24' so that's good enough for me.
     torch.cuda.set_device(device)
 
-    # pre-barrier log each ranks setup
-    if dist.is_initialized():
-        print(f"Distributed training initialized on rank ({rank}/{world_size}) as device={device}")
-    # wait for all ranks
-    # dist.barrier()
-    torch.distributed.barrier() # barrier not barriering?
-    # log "success" message (still possible topo is misconfigured but no errors yet)
-    print0("Distributed training setup successful. All ranks initialized correctly.", console=True)
+    if master_process: print(f"{'#' * 80}", flush=True)
+    dist.barrier()
+    print(f"Distributed training initialized on rank ({rank}/{world_size}) as device={device} via {os.getenv("MASTER_ADDR", "null_badbad")}:{os.getenv("MASTER_PORT", "null_badbad")}",flush=True)
+    dist.barrier()
+    if master_process: print(f"{'#' * 80}", flush=True)
 
     # On APUs like MI300A and GH200, gpu and cpu memory are shared and so both types of allocations
     # fight for the same space. Tends to make things behave/fail better when you cap useable vram.
-    # if cfg.per_process_vram_ratio is not None:
-    #     assert (
-    #         cfg.per_process_vram_ratio > 0.0 and cfg.per_process_vram_ratio < 1.0
-    #     ), f"Invalid per_process_vram_ratio: {cfg.per_process_vram_ratio}, must be in (0.0, 1.0)"
-    #     torch.cuda.set_per_process_memory_fraction(cfg.per_process_vram_ratio)
-    #     print(f"per_process_vram_ratio set to: {cfg.per_process_vram_ratio}")
+    if cfg.per_process_vram_ratio is not None:
+        assert (
+            cfg.per_process_vram_ratio > 0.0 and cfg.per_process_vram_ratio < 1.0
+        ), f"Invalid per_process_vram_ratio: {cfg.per_process_vram_ratio}, must be in (0.0, 1.0)"
+        torch.cuda.set_per_process_memory_fraction(cfg.per_process_vram_ratio)
+        print(f"per_process_vram_ratio set to: {cfg.per_process_vram_ratio}")
     
     # Handle checkpoint config loading
     cfg = handle_checkpoint_config(cfg, rank)
@@ -577,7 +584,11 @@ def main(cfg: TrainingConfig):
             return cfg.kld_weight
     
     # Compile model
-    model = torch.compile(model, dynamic=False)
+    if cfg.compile_model:
+        print0("Compiling model.", logfile, console=True)
+        model = torch.compile(model, dynamic=False)
+    else:
+        print0("Skipping model compilation.", logfile, console=True)
     
     # Warmup kernels - but skip if we're resuming from a checkpoint
     if cfg.resume_from is None:
@@ -675,7 +686,8 @@ def main(cfg: TrainingConfig):
                 
                 print0(f"step:{step}/{cfg.train_num_steps} val_loss:{val_loss:.4f} "
                        f"val_recon_loss:{val_recon_loss:.4f} val_kld_loss:{val_kld_loss:.4f} "
-                       f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms",
+                    #    f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms",
+                       f"train_time:{training_time_ms/1e3:.0f}s step_avg:{training_time_ms/1e3/max(step, 1):.2f}s",
                        logfile, console=True)
                 
                 # Log to wandb
@@ -803,20 +815,29 @@ def main(cfg: TrainingConfig):
             opt.step()
         
         # Logging
-        if master_process and step % 50 == 0:
+        if step % cfg.log_step_interval == 0:
             tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * cfg.model_config.max_seq_len  # Changed to model_config
             epoch = tokens_processed / cfg.total_tokens
             
             approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
+
+            time_remaining = (cfg.train_num_steps - step) * (approx_training_time_ms / (step + 1))
+            # time_remaining_str = str(timedelta(milliseconds=int(time_remaining)))
+            time_remaining_hrs = int(time_remaining) / 1e3 / 3600
             
             print0(f"step:{step+1}/{cfg.train_num_steps} loss:{total_loss:.4f} "
                    f"recon_loss:{total_recon_loss:.4f} kld_loss:{total_kld_loss:.4f} "
                    f"kld_weight:{current_kld_weight:.6f} grad_norm:{grad_norm:.4f} "
-                   f"lr:{current_lr:.6f} train_time:{approx_training_time_ms:.0f}ms "
-                   f"step_avg:{approx_training_time_ms/(step + 1):.2f}ms",
+                   f"lr:{current_lr:.6f} "
+                #    f"train_time:{approx_training_time_ms:.0f}ms "
+                #    f"step_avg:{approx_training_time_ms/(step + 1):.2f}ms",
+                    f"train_time:{approx_training_time_ms/1e3:.0f}s "
+                    f"step_avg:{approx_training_time_ms/1e3/(step + 1):.2f}s "
+                    f"epoch:{epoch:.4f} tokens:{tokens_processed} "
+                    f"time_remaining_hrs:{time_remaining_hrs:02f}hr",
                    logfile, console=True)
-            
-            if step % 100 == 0:
+            if master_process:
+                # if step % 100 == 0:
                 logs = {
                     "train/loss": total_loss,
                     "train/reconstruction_loss": total_recon_loss,
@@ -826,7 +847,8 @@ def main(cfg: TrainingConfig):
                     "train/lr": current_lr,
                     "step": step,
                     "epoch": epoch,
-                    "samples": tokens_processed
+                    "samples": tokens_processed,
+                    "time_remaining_hrs": time_remaining_hrs,
                 }
                 wandb.log(logs, step=step)
     

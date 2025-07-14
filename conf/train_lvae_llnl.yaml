@@ -1,6 +1,9 @@
 defaults:
   - _self_
 
+# Cluster shenanigans
+per_process_vram_ratio: 0.8
+
 # General
 seed: 412
 wandb_name: "scratch_latent_vae"
@@ -11,29 +14,41 @@ save_dir: "saved_latent_models"
 
 # Data
 data:
-  dataset_name: "fineweb-edu_10b"
-  num_samples: null
-  train_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin"
-  val_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin"
-  total_tokens: 100000000000
+  # BIN FILE APPROACH (recommended for performance with large datasets)
+  # Remove the comment (#) from the lines below to use .bin files:
+  train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"  # glob pattern for training .bin files
+  val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"      # glob pattern for validation .bin files (optional)
+  total_tokens: 100000000000  # Total tokens in dataset (100B) - used for epoch calculation with bin files
+  
+  # TRADITIONAL DATASET LOADING (default approach)
+  # Comment out these lines if using bin files above:
+  # dataset_name: "fineweb-edu_10b"
+  # num_samples: null
 
 # Model
 model:
-  max_seq_len: 128
+  max_seq_len: 512
   d_model: 768
   latent_dim: 1536
   num_latents: 32
   dim_head: 128
   num_layers: 8
   latent_model_path: null  # Path to resume from external checkpoint
+
+  # BIN FILE APPROACH (recommended for performance with large datasets)
+  # Remove the comment (#) from the lines below to use .bin files:
   tokenizer_name: "gpt2"
+  # TRADITIONAL DATASET LOADING (default approach)
+  # Comment out these lines if using bin files above:
+  # tokenizer_name: "meta-llama/Llama-3.2-1B"
+
 # Training
 training:
-  train_bs: 48
+  train_bs: 96
   eval_bs: 8
-  train_num_steps: 10000
+  train_num_steps: 254314 # 100e9 / (768*512) = 254,313.1510416667
   eval_every: 1000
-  grad_accumulate: 16
+  grad_accumulate: 8
   mixed_precision: "bf16"
   kld_weight: 1e-3
   # Optimizer

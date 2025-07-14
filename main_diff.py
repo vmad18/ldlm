@@ -12,7 +12,7 @@ if project_root not in sys.path:
 
 from diffusion.train_cfm import Trainer
 
-@hydra.main(config_path="conf", config_name="train_cfm", version_base=None)
+@hydra.main(config_path="conf", config_name="train_cfm_llnl", version_base=None)
 def main(cfg: DictConfig) -> None:
     """
     Main training script for the diffusion model, configured with Hydra.
