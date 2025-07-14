@@ -343,6 +343,7 @@ def main(cfg: TrainingConfig):
 
     # Dist init is a synchronous operation that must execute properly.
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"  # ensure barrier is used for initialization
+
     dist.init_process_group(
         backend="nccl",
         rank=rank,
@@ -382,6 +383,14 @@ def main(cfg: TrainingConfig):
         cfg_str = OmegaConf.to_yaml(cfg.model_config, resolve=True)  # Changed to model_config
         cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
         results_folder = Path(cfg.output_dir) / cfg_hash
+        
+        # Check if we should auto-resume from existing checkpoint
+        if cfg.resume_from is None and results_folder.exists():
+            potential_checkpoint = results_folder / "model_best.pt"
+            if potential_checkpoint.exists():
+                cfg.resume_from = str(results_folder)
+                print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
+        
         results_folder.mkdir(parents=True, exist_ok=True)
         
         # Save config

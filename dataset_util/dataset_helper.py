@@ -487,7 +487,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     
     Args:
         filename_pattern: glob pattern for .bin files
-        batch_size: total batch size across all ranks
+        batch_size: local batch size per rank
         rank: current process rank
         world_size: total number of processes
         sequence_length: sequence length for each sample
@@ -499,13 +499,9 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     """
     files = [Path(file) for file in sorted(glob.glob(filename_pattern))]
     assert len(files) > 0, f"No files found matching pattern: {filename_pattern}"
-    assert batch_size % world_size == 0, f"Batch size {batch_size} must be divisible by world size {world_size}"
     
-    # local_batch_size = batch_size // world_size
-    # FIXME: lets identify batch_size as passed from config, as the local batch size
-    # accumulation and more workers then multiply this out to create the effective world batch size.
-    # later logic might not be correct for more than one rank now.
     local_batch_size = batch_size
+    total_tokens_needed = world_size * local_batch_size * sequence_length
     
     # Start from the specified file index
     if start_file_idx >= len(files):
@@ -517,7 +513,8 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     tokens, pos = _load_data_shard(next(file_iter)), 0
     
     while True:
-        if pos + batch_size * sequence_length + 1 >= len(tokens):
+        # Check if we have enough tokens for all ranks
+        if pos + total_tokens_needed >= len(tokens):
             try:
                 tokens, pos = _load_data_shard(next(file_iter)), 0
             except StopIteration:
@@ -544,7 +541,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
             "attention_mask": attention_mask,
         }
         
-        pos += batch_size * sequence_length
+        pos += total_tokens_needed
         yield batch
 
 def _num_tokens_in_shard(file: Path):
