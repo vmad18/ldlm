@@ -1,5 +1,4 @@
 defaults:
-  - override hydra/launcher: my_cluster
   - _self_
 
 # General settings
@@ -15,8 +14,8 @@ general:
 data:
   # BIN FILE APPROACH (recommended for performance with large datasets)
   # Remove the comment (#) from the lines below to use .bin files:
-  train_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_train_*.bin"
-  val_bin_pattern: "/scratch/gpfs/ashwinee/new/modded-nanogpt/data/fineweb100B/fineweb_val_*.bin"
+  train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
+  val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
   total_tokens: 100000000000
 
   # TRADITIONAL DATASET LOADING (default approach)

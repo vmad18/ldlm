@@ -181,6 +181,20 @@ class Trainer(object):
         # --- 2. Create a bare Trainer instance and Accelerator ---
         trainer = cls.__new__(cls)
         trainer.accelerator = Accelerator(mixed_precision=mixed_precision)
+        
+        assert self.accelerator.num_processes == 1, "Multi-gpu training is no bueno rn"
+        print(
+            f"Accelerator (RANK: {self.accelerator.process_index}, "
+            f"LOCAL_RANK: {self.accelerator.local_process_index}, "
+            f"WORLD_SIZE: {self.accelerator.num_processes}) - "
+            f"Mixed Precision: {self.accelerator.mixed_precision}, "
+            f"Device: {self.accelerator.device}, "
+        )
+        # these have no setters and are not constructor args (straight to jail)
+        # self.accelerator.local_process_index = os.getenv("LOCAL_RANK", 0)
+        # self.accelerator.process_index = os.getenv("RANK", 0)
+        # self.accelerator.num_processes = os.getenv("WOLRD_SIZE", 1)
+        # so we're gonna ignore them
 
         # --- 3. Manually Set Up VAE and Tokenizer ---
         vae_args_path = checkpoint_dir / 'vae_args.json'
@@ -290,7 +304,18 @@ class Trainer(object):
         loaded_vae_cfg = OmegaConf.load(vae_config_path)
 
         # Instantiate VAE and its corresponding tokenizer from the saved config
-        self.ae, self.tokenizer = get_latent_vae_tokenizer(loaded_vae_cfg.model)
+        vae_model_config = loaded_vae_cfg.model
+        
+        # TODO: potentially a temporary patch to handle loading prev run cfgs that didnt spec tokenizer
+        if not hasattr(loaded_vae_cfg.model, "tokenizer_name"):
+            assert hasattr(cfg.model, "tokenizer_name") is not None, (
+            "If the loaded_vae_cfg.model doesn't specify a tokenizer, the current cfg.model needs to spec one."
+            "Proceed with caution, technically leaves room for a mismatch."
+            )
+            print(f"Loading tokenizer according to runtime config (not loaded VAE ckpt).")
+            vae_model_config.tokenizer_name = cfg.model.tokenizer_name
+
+        self.ae, self.tokenizer = get_latent_vae_tokenizer(vae_model_config)
         print(f"Loaded VAE and its tokenizer ({self.tokenizer.name_or_path}).")
         
         # Move model to device before loading state_dict
@@ -414,7 +439,7 @@ class Trainer(object):
             if self.accelerator.is_main_process:
                 self.accelerator.print("Using traditional dataset loading")
             
-            dataset = get_dataset(cfg.data.dataset_name, shard_size=cfg.data.shard_size)
+            dataset = get_dataset(cfg.data.dataset_name) #, shard_size=cfg.data.shard_size) # FIXME make this flexibly optional
             self.dataset = dataset.shuffle(seed=cfg.general.seed)
             self.num_samples_eval = len(self.dataset['valid'])
 
