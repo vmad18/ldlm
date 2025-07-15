@@ -373,7 +373,7 @@ def main(cfg: TrainingConfig):
     logfile = None
     if master_process:
         # Create unique directory for this run
-        cfg_str = OmegaConf.to_yaml(cfg.model_config, resolve=True)  # Changed to model_config
+        cfg_str = OmegaConf.to_yaml(cfg, resolve=True)  # Changed to model_config
         cfg_hash = hashlib.md5(cfg_str.encode()).hexdigest()
         results_folder = Path(cfg.output_dir) / cfg_hash
         
@@ -579,42 +579,36 @@ def main(cfg: TrainingConfig):
     # Compile model
     model = torch.compile(model, dynamic=False)
     
-    # Warmup kernels - but skip if we're resuming from a checkpoint
-    if cfg.resume_from is None:
-        if master_process:
-            print0("Warming up kernels...", logfile, console=True)
-        
-        warmup_steps = 3
-        initial_state = dict(
-            model=copy.deepcopy(model.state_dict()),
-            optimizer_adam=copy.deepcopy(optimizer_adam.state_dict()),
-            optimizer_muon=copy.deepcopy(optimizer_muon.state_dict())
-        )
-        
-        for _ in range(warmup_steps):
-            batch = next(train_loader)
-            batch = {k: v.cuda() for k, v in batch.items()}
-            
-            losses = model(batch["input_ids"], attn_mask=batch["attention_mask"])
-            loss = losses['reconstruction_loss'] + get_annealed_kld_weight(0) * losses['kld_loss']
-            loss.backward()
-            
-            wait_for_gradients()
-            
-            for opt in optimizers:
-                opt.step()
-            
-            model.zero_grad(set_to_none=True)
-        
-        # Restore initial state
-        model.load_state_dict(initial_state["model"])
-        optimizer_adam.load_state_dict(initial_state["optimizer_adam"])
-        optimizer_muon.load_state_dict(initial_state["optimizer_muon"])
-        del initial_state
-    else:
-        if master_process:
-            print0("Skipping kernel warmup (resuming from checkpoint)", logfile, console=True)
+    if master_process:
+        print0("Warming up kernels...", logfile, console=True)
     
+    warmup_steps = 3
+    initial_state = dict(
+        model=copy.deepcopy(model.state_dict()),
+        optimizer_adam=copy.deepcopy(optimizer_adam.state_dict()),
+        optimizer_muon=copy.deepcopy(optimizer_muon.state_dict())
+    )
+    
+    for _ in range(warmup_steps):
+        batch = next(train_loader)
+        batch = {k: v.cuda() for k, v in batch.items()}
+        
+        losses = model(batch["input_ids"], attn_mask=batch["attention_mask"])
+        loss = losses['reconstruction_loss'] + get_annealed_kld_weight(0) * losses['kld_loss']
+        loss.backward()
+        
+        wait_for_gradients()
+        
+        for opt in optimizers:
+            opt.step()
+        
+        model.zero_grad(set_to_none=True)
+    
+    # Restore initial state
+    model.load_state_dict(initial_state["model"])
+    optimizer_adam.load_state_dict(initial_state["optimizer_adam"])
+    optimizer_muon.load_state_dict(initial_state["optimizer_muon"])
+    del initial_state
     # Training loop
     if master_process:
         print0("Starting training...", logfile, console=True)
