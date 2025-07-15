@@ -15,13 +15,20 @@ RCCL_INSTALL_DIR = "/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.3
 ROCM_VERSION = "6.3.0"
 RCCL_CFG = "rdzv-lbann"
 
-QOS = "pdebug"
-# QOS = "pbatch"
+# EXTRA_COMPILE_FLAGS = False
+EXTRA_COMPILE_FLAGS = True
+
+# LOG_RECOMPILES=False
+LOG_RECOMPILES=True
+
+# QOS = "pdebug"
+QOS = "pbatch"
 
 # BANK = "guests"
 BANK = "effml"
 
-TIME_LIMIT = 59  # in minutes
+# TIME_LIMIT = 59  # in minutes
+TIME_LIMIT = 15
 # TIME_LIMIT = 1440 
 
 REPETITIONS = 1
@@ -31,13 +38,7 @@ DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-# BASE_RUN_NAME = f"test_sweep"
-# BASE_RUN_NAME = f"train_lvae_100b_debug"
-# BASE_RUN_NAME = f"train_lvae_100b"
-# BASE_RUN_NAME = f"train_lvae_dist_debug"
-# BASE_RUN_NAME = f"train_lvae_dist_debug"
-# BASE_RUN_NAME = f"train_lvae_dist_sweep"
-BASE_RUN_NAME = f"train_lvae_dist_cands"
+BASE_RUN_NAME = f"train_lvae_dist_scaling"
 
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
@@ -49,27 +50,20 @@ TGT_TOKENS = 100e9  # 100B tokens
 # arg list is:
 # script, cli_args, nodes, gpn, mbsz, accum, seq_len, lr, ...
 exp_list = [
-    # ["main_lvae.py", "", 1, 1, 48, 16, 512, 1e-4],
-    # ["main_lvae.py", "", 1, 1, 64, 12, 512, 1e-4],
-    # ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
-    # ["main_lvae.py", "", 1, 1, 128, 6, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 64, 1, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 64, 1, 512, 1e-4],
-    # ["run_distributed_training_no_hydra.py", "", 1, 4, 64, 1, 512, 1e-4],
-    # ["run_distributed_training_no_hydra.py", "", 2, 4, 64, 1, 512, 1e-4],
-    
-    # post idk what happened with the dist debugging ...
-    # ["main_lvae.py", "", 1, 1, 96, 8, 512, 1e-4],
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 1, 96, 8, 512, 1e-4],
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 96, 2, 512, 1e-4],
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 96, 1, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 96, 8, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 96, 8, 512, 1e-4],
-    # nothing has run beyond 2N at the moment
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl compile_model=False", 4, 4, 96, 8, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl compile_model=False", 8, 4, 96, 8, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl compile_model=True", 4, 4, 64, 12, 512, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl compile_model=True", 8, 4, 64, 12, 512, 1e-4],
+    # First try to compile on a single gpu then step it up
+    # While the mbsz 256 cfg runs at 1N only the mbsz 128 version ran reliably past that
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 1, 256, 8, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 256, 8, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 256, 4, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 256, 2, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 256, 1, 128, 1e-4],
+    # Trying to get a slightly less intensive setting so that 4N and beyond works
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 1, 128, 2, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 128, 2, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 128, 2, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 128, 2, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 128, 2, 128, 1e-4],
+    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 16, 4, 128, 1, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
@@ -96,24 +90,18 @@ for exp in final_exp_list:
 
     # mod lr
     lr_name_str = f"lr{lr:.0e}"
-    # lr_cfg_string = f" training.optimizer.learning_rate={lr}"
     lr_cfg_string = f" learning_rate={lr}"
-    # lr_cfg_string = f" --learning_rate={lr}"
     cli_args += lr_cfg_string
 
     # mod bsz and seq len
     wbsz = nodes * gpn * mbsz * accum
     bsz_name_str = f"mb{mbsz}-acc{accum}-wb{wbsz}-seq{seq_len}"
-    # train_bsz_cfg_string = f" training.train_bs={mbsz} training.grad_accumulate={accum} model.max_seq_len={seq_len}"
     train_bsz_cfg_string = f" train_bs={mbsz} grad_accumulate={accum} model.max_seq_len={seq_len}"
-    # train_bsz_cfg_string = f" --train_bs={mbsz} --grad_accumulate={accum} --max_seq_len={seq_len}"
     cli_args += train_bsz_cfg_string
 
+    # compute max steps automatically for token target
     max_steps = int(TGT_TOKENS / (wbsz*seq_len))+1
-
     cli_args += f" train_num_steps={max_steps}"
-    # cli_args += f" --train_num_steps={max_steps}"
-
 
     # mod more things 
     # ...
@@ -140,6 +128,8 @@ for exp in final_exp_list:
         --run_name={run_name} \
         --custom_invocation='{custom_invocation}' \
         --pass_run_name=False \
+        --add_compile_flags={EXTRA_COMPILE_FLAGS} \
+        --log_recompiles={LOG_RECOMPILES} \
         {'--dryrun' if WRITE_ONLY else ''}
     """
     total_launches += 1
