@@ -28,8 +28,8 @@ QOS = "pbatch"
 BANK = "effml"
 
 # TIME_LIMIT = 59  # in minutes
-TIME_LIMIT = 15
-# TIME_LIMIT = 1440 
+# TIME_LIMIT = 15
+TIME_LIMIT = 1440 
 
 REPETITIONS = 1
 # REPETITIONS = 3
@@ -38,7 +38,8 @@ DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-BASE_RUN_NAME = f"train_lvae_dist_scaling"
+# BASE_RUN_NAME = f"train_lvae_dist_scaling"
+BASE_RUN_NAME = f"train_lvae_dist_prod"
 
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
@@ -63,7 +64,9 @@ exp_list = [
     # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 128, 2, 128, 1e-4],
     # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 128, 2, 128, 1e-4],
     # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 128, 2, 128, 1e-4],
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 16, 4, 128, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 16, 4, 128, 1, 128, 1e-4],
+    # best so far in time to soln
+    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 256, 2, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
