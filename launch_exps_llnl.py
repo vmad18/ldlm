@@ -34,7 +34,8 @@ TIME_LIMIT = 1440
 REPETITIONS = 1
 # REPETITIONS = 3
 # DEPENDENCY = "afterany"
-DEPENDENCY = None
+DEPENDENCY = "singleton"
+# DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
@@ -66,7 +67,8 @@ exp_list = [
     # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 128, 2, 128, 1e-4],
     # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 16, 4, 128, 1, 128, 1e-4],
     # best so far in time to soln
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 256, 2, 128, 1e-4],
+    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 256, 2, 128, 1e-4],
+    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 256, 1, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
