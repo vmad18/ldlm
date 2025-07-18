@@ -278,10 +278,29 @@ def load_from_checkpoint(checkpoint_path, model, optimizer_adam, optimizer_muon,
         if rank == 0:
             print(f"Best validation loss: {best_val_loss}")
     
+    # Load training time
+    training_time_ms = data.get('training_time_ms', 0)
+    
+    # Restore RNG states for reproducibility
+    if 'rng_state' in data:
+        try:
+            rng_state = data['rng_state']
+            random.setstate(rng_state['python'])
+            np.random.set_state(rng_state['numpy'])
+            print(f"rng_state['torch'].dtype: {rng_state['torch'].dtype}")
+            torch.set_rng_state(rng_state['torch'])  # Should now be ByteTensor
+            torch.cuda.set_rng_state_all(rng_state['torch_cuda'])  # Should now be list of ByteTensors
+            if rank == 0:
+                print("Restored RNG states for reproducibility.")
+        except Exception as e:
+            if rank == 0:
+                print(e)
+                print(f"Warning: Could not restore RNG states: {e}. Continuing with current RNG state.")
+    
     if rank == 0:
         print("Checkpoint loading complete.")
     
-    return step, best_val_loss
+    return step, best_val_loss, training_time_ms
 
 def handle_checkpoint_config(cfg: TrainingConfig, rank: int):
     """Handle checkpoint loading and config merging (similar to train_lvae.py)."""
@@ -405,7 +424,7 @@ def main(cfg: TrainingConfig):
             project="lvae-distributed",
             name=f"{cfg.wandb_name}-{cfg_hash[:8]}" if cfg.wandb_name else f"run-{cfg_hash[:8]}",
             dir=str(results_folder),
-            config=OmegaConf.to_container(cfg.model_config, resolve=True)  # Changed to model_config
+            config=OmegaConf.to_container(cfg.model_config, resolve=True)
         )
         
         print0(f"Results folder: {results_folder}", logfile, console=True)
@@ -452,10 +471,18 @@ def main(cfg: TrainingConfig):
         world_size=world_size
     )
     
+    # Set initial_lr for proper learning rate scheduling after resume
+    for group in optimizer_adam.param_groups:
+        group['initial_lr'] = cfg.learning_rate
+    for group in optimizer_muon.param_groups:
+        group['initial_lr'] = cfg.muon_lr
+    
     optimizers = [optimizer_adam, optimizer_muon]
     
     # Setup gradient bucketing
     all_params = [p for p in model.parameters() if p.requires_grad]
+    # print total number of trainable parameters
+    print(f"Total number of trainable parameters: {sum(p.numel() for p in all_params)}")
     param_buckets = create_buckets(all_params)
     
     if master_process:
@@ -515,14 +542,20 @@ def main(cfg: TrainingConfig):
     # Load checkpoint if resuming
     step = 0
     best_val_loss = float('inf')
+    training_time_ms = 0
     
     if cfg.resume_from is not None:
         if master_process:
             print0(f"Loading checkpoint from: {cfg.resume_from}", logfile, console=True)
         
-        step, best_val_loss = load_from_checkpoint(
+        step, best_val_loss, training_time_ms = load_from_checkpoint(
             cfg.resume_from, model, optimizer_adam, optimizer_muon, device, rank
         )
+        
+        # Reset gradient bucket state after loading checkpoint
+        for i in range(len(bucket_ready_count)):
+            bucket_ready_count[i] = 0
+            bucket_handles[i] = None
     
     # Setup data loaders AFTER checkpoint loading so we can wind to correct position
     if cfg.resume_from is not None and step > 0:
@@ -624,7 +657,6 @@ def main(cfg: TrainingConfig):
     if master_process:
         print0("Starting training...", logfile, console=True)
     
-    training_time_ms = 0
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     
@@ -707,7 +739,14 @@ def main(cfg: TrainingConfig):
                         'optimizer_adam': optimizer_adam.state_dict(),
                         'optimizer_muon': optimizer_muon.state_dict(),
                         'best_val_loss': best_val_loss,
-                        'val_loss': val_loss
+                        'val_loss': val_loss,
+                        'training_time_ms': training_time_ms,
+                        'rng_state': {
+                            'python': random.getstate(),
+                            'numpy': np.random.get_state(),
+                            'torch': torch.get_rng_state(),  # Ensure CPU tensor
+                            'torch_cuda': torch.cuda.get_rng_state_all(),  # Ensure CPU tensors
+                        }
                     }
                     
                     torch.save(checkpoint, results_folder / "model.pt")
@@ -716,6 +755,7 @@ def main(cfg: TrainingConfig):
                         best_val_loss = val_loss
                         torch.save(checkpoint, results_folder / "model_best.pt")
                         logs['val/best_loss'] = best_val_loss
+                        print(f"New best val loss: {best_val_loss}")
                 
                 # Generate samples for logging
                 if step % (cfg.eval_every * 2) == 0:
@@ -794,11 +834,16 @@ def main(cfg: TrainingConfig):
         
         # Update learning rates
         current_lr = get_lr(step)
-        for opt in optimizers:
-            for group in opt.param_groups:
-                group["lr"] = group.get("initial_lr", cfg.learning_rate) * current_lr
         
-        # Momentum warmup for Muon
+        # Adam optimizer - use cfg.learning_rate as base
+        for group in optimizer_adam.param_groups:
+            group["lr"] = group.get("initial_lr", cfg.learning_rate) * current_lr
+        
+        # Muon optimizer - use cfg.muon_lr as base  
+        for group in optimizer_muon.param_groups:
+            group["lr"] = group.get("initial_lr", cfg.muon_lr) * current_lr
+        
+        # Momentum warmup for Muon (only if momentum isn't already warmed up)
         if step < 300:
             frac = min(step / 300, 1)
             for group in optimizer_muon.param_groups:
@@ -828,7 +873,7 @@ def main(cfg: TrainingConfig):
                     f"train_time:{approx_training_time_ms/1e3:.0f}s "
                     f"step_avg:{approx_training_time_ms/1e3/(step + 1):.2f}s "
                     f"epoch:{epoch:.4f} tokens:{tokens_processed} "
-                    f"time_remaining_hrs:{time_remaining_hrs:02f}hr",
+                    f"time_remaining_hrs:{time_remaining_hrs:.2f}hr",
                    logfile, console=True)
             if master_process:
                 # if step % 100 == 0:
