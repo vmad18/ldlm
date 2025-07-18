@@ -8,17 +8,17 @@ per_process_vram_ratio: 0.8
 model:
   vocab_size: 50257
   d_model: 768
-  latent_dim: 1024
-  num_latents: 32
+  latent_dim: 2048
+  num_latents: 1
   dim_head: 128
-  max_seq_len: 512
-  num_layers: 4
+  max_seq_len: 128
+  num_layers: 12
   tokenizer_name: "gpt2"
 
 # Training configuration
-train_num_steps: 254314
-train_bs: 96
-eval_bs: 96
+train_num_steps: 100000
+train_bs: 256
+eval_bs: 256
 eval_every: 500
 grad_accumulate: 8
 resume_from: null

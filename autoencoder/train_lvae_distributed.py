@@ -79,7 +79,7 @@ class TrainingConfig:
     per_process_vram_ratio: Optional[float] = None # eg. 0.8, For APUs like MI300A and GH200
 
 # Muon optimizer (copied from train_gpt.py)
-@torch.compile
+@torch.compile(dynamic=False)
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int) -> torch.Tensor:
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G.

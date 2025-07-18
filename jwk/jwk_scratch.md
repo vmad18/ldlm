@@ -201,3 +201,33 @@ found a reasonable batch size for single gpu
 
 having to rip things out and print to figure out whats up, make sure to reconcile from main eventually
 
+
+eventually realized a correct looking dist initialization, but was thrown by rank0 logs and print buffering
+
+# testing new vae shapes, looking for > 2N unlock
+
+refernce point from slack
+
+```
+I'm getting 190h to 100B on 1N4, w this config
+# Model configuration
+model:
+  vocab_size: 50257
+  d_model: 768
+  latent_dim: 2048
+  num_latents: 1
+  dim_head: 128
+  max_seq_len: 128
+  num_layers: 12
+  tokenizer_name: "gpt2"
+
+# Training configuration
+train_num_steps: 100000
+train_bs: 256
+eval_bs: 256
+
+and loss is definitely going down
+```
+
+getting something like 195 hr time to 100B on 1N4n
+
