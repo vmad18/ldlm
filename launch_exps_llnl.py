@@ -31,15 +31,15 @@ BANK = "effml"
 # TIME_LIMIT = 15
 TIME_LIMIT = 1440 
 
-REPETITIONS = 1
-# REPETITIONS = 3
+# REPETITIONS = 1
+REPETITIONS = 2
 # DEPENDENCY = "afterany"
-DEPENDENCY = "singleton"
-# DEPENDENCY = None
+# DEPENDENCY = "singleton"
+DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-# BASE_RUN_NAME = f"train_lvae_dist_scaling"
+# BASE_RUN_NAME = f"train_lvae_dist_debug_sweep"
 BASE_RUN_NAME = f"train_lvae_dist_prod"
 
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
@@ -52,23 +52,11 @@ TGT_TOKENS = 100e9  # 100B tokens
 # arg list is:
 # script, cli_args, nodes, gpn, mbsz, accum, seq_len, lr, ...
 exp_list = [
-    # First try to compile on a single gpu then step it up
-    # While the mbsz 256 cfg runs at 1N only the mbsz 128 version ran reliably past that
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 1, 256, 8, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 256, 8, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 256, 4, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 256, 2, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 256, 1, 128, 1e-4],
-    # Trying to get a slightly less intensive setting so that 4N and beyond works
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 1, 128, 2, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 1, 4, 128, 2, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 2, 4, 128, 2, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 128, 2, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 128, 2, 128, 1e-4],
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 16, 4, 128, 1, 128, 1e-4],
-    # best so far in time to soln
-    # ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 4, 4, 256, 2, 128, 1e-4],
-    ["run_distributed_training.py", "--config-path conf --config-name train_lvae_dist_llnl", 8, 4, 256, 1, 128, 1e-4],
+    # hit the pair as both 8N and 16N-ers?
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
@@ -82,7 +70,7 @@ for exp in final_exp_list:
 
     (
         script,
-        cli_args,
+        cfg_name,
         nodes,
         gpn,
         mbsz,
@@ -92,6 +80,12 @@ for exp in final_exp_list:
     ) = exp
 
     gpus = nodes * gpn
+
+    cli_args = ""
+
+    # config name
+    cfg_name_str = cfg_name
+    cli_args += f" --config-path conf --config-name {cfg_name}"
 
     # mod lr
     lr_name_str = f"lr{lr:.0e}"
@@ -112,7 +106,7 @@ for exp in final_exp_list:
     # ...
 
     # join to a unique run name for the experiment
-    run_name = f"{BASE_RUN_NAME}_{script.strip('.py')}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
+    run_name = f"{cfg_name}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
 
     # put together the actual "train.py" command
     custom_invocation = f"{INVOCATION_PREAMBLE} {script} {cli_args}"
