@@ -32,7 +32,7 @@ BANK = "effml"
 TIME_LIMIT = 1440 
 
 # REPETITIONS = 1
-REPETITIONS = 2
+REPETITIONS = 3
 # DEPENDENCY = "afterany"
 # DEPENDENCY = "singleton"
 DEPENDENCY = None
@@ -45,18 +45,15 @@ BASE_RUN_NAME = f"train_lvae_dist_prod"
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 
-TGT_TOKENS = 100e9  # 100B tokens
+TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
 
 # Cfgs
 # gpn = gpus per node
 # arg list is:
-# script, cli_args, nodes, gpn, mbsz, accum, seq_len, lr, ...
+# script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr, ...
 exp_list = [
-    # hit the pair as both 8N and 16N-ers?
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
-    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
-    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
