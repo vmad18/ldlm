@@ -268,6 +268,11 @@ def load_from_checkpoint(checkpoint_path, model, optimizer_adam, optimizer_muon,
         optimizer_muon.load_state_dict(data['optimizer_muon'])
         if rank == 0:
             print("Loaded separate optimizer states.")
+            # Debug: Check if optimizers have correct parameter references
+            adam_param_count = sum(1 for group in optimizer_adam.param_groups for param in group['params'])
+            muon_param_count = sum(1 for group in optimizer_muon.param_groups for param in group['params'])
+            print(f"Adam optimizer managing {adam_param_count} parameters")
+            print(f"Muon optimizer managing {muon_param_count} parameters")
     elif 'optimizer_adam' in data:
         optimizer_adam.load_state_dict(data['optimizer_adam'])
         if rank == 0:
@@ -288,8 +293,9 @@ def load_from_checkpoint(checkpoint_path, model, optimizer_adam, optimizer_muon,
             random.setstate(rng_state['python'])
             np.random.set_state(rng_state['numpy'])
             print(f"rng_state['torch'].dtype: {rng_state['torch'].dtype}")
-            torch.set_rng_state(rng_state['torch'])  # Should now be ByteTensor
-            torch.cuda.set_rng_state_all(rng_state['torch_cuda'])  # Should now be list of ByteTensors
+            # print(f"rng_state['torch_cuda'].dtype: {rng_state['torch_cuda'].dtype}")
+            torch.set_rng_state(rng_state['torch'].cpu().byte())  # Should now be ByteTensor
+            torch.cuda.set_rng_state_all([state.byte() for state in rng_state['torch_cuda']])  # Should now be list of ByteTensors
             if rank == 0:
                 print("Restored RNG states for reproducibility.")
         except Exception as e:
@@ -539,7 +545,14 @@ def main(cfg: TrainingConfig):
             bucket_ready_count[i] = 0
             bucket_handles[i] = None
     
-    # Load checkpoint if resuming
+    # Compile model BEFORE loading checkpoint to ensure optimizer parameter references are correct
+    if cfg.compile_model:
+        print0("Compiling model (before checkpoint loading to preserve optimizer parameter references).", logfile, console=True)
+        model = torch.compile(model, dynamic=False)
+    else:
+        print0("Skipping model compilation.", logfile, console=True)
+    
+    # Load checkpoint if resuming (AFTER compilation so optimizer refs are correct)
     step = 0
     best_val_loss = float('inf')
     training_time_ms = 0
@@ -615,13 +628,6 @@ def main(cfg: TrainingConfig):
             return cfg.kld_weight * (step / cfg.kld_annealing_steps)
         else:
             return cfg.kld_weight
-    
-    # Compile model
-    if cfg.compile_model:
-        print0("Compiling model.", logfile, console=True)
-        model = torch.compile(model, dynamic=False)
-    else:
-        print0("Skipping model compilation.", logfile, console=True)
     
     if master_process:
         print0("Warming up kernels...", logfile, console=True)
