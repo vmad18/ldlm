@@ -91,25 +91,28 @@ class LatentVAEModel(nn.Module):
         self.max_tokens = cfg_enc.max_tokens
         self.freeze = ctx
 
-    def get_latents(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor: 
+    def get_latents(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, mu_only: bool = True) -> torch.Tensor: 
         x = self.embed(input_ids) 
         if attn_mask is None: 
             attn_mask = torch.ones_like(input_ids)
-        return self.vae.reparameterize(*self.vae.encode(x, attn_mask.bool()), only_mu=True)
+        return self.vae.reparameterize(*self.vae.encode(x, attn_mask.bool()), mu_only = mu_only)
 
-    # decode diffused latent 
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         decoded_embeds = self.vae.decode(latent)
         return self.dembed_head(decoded_embeds)
 
-    def autoencode(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
+    def autoencode(
+                    self, 
+                    input_ids: torch.Tensor, 
+                    attn_mask: Optional[torch.Tensor] = None, 
+                    mu_only: bool = False,) -> dict:
         *_, s = input_ids.shape 
         embeddings = self.embed(input_ids) 
         
         if attn_mask is None: 
             attn_mask = torch.ones_like(input_ids)
 
-        recon_encs, mu, log_var = self.vae(embeddings, attn_mask.bool())
+        recon_encs, mu, log_var = self.vae(embeddings, attn_mask.bool(), mu_only)
         recon_encs = self.dembed_head(recon_encs[..., :s, :])
         return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), input_ids.view(-1).to(torch.int64), mu, log_var)
 
