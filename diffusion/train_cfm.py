@@ -678,7 +678,7 @@ class Trainer(object):
 
                         x_0 = torch.randn_like(latent)
                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
-                        v_t = self.v_predictor(x_t, t, x_0)
+                        v_t = self.v_predictor(x_t, t, x_0)  # we need to condition on the initial conditions (x_0) for flow matching (bc it's an ode solver) 
                         loss = F.mse_loss(v_t.float(), u_t.float())
                         
                         total_loss += loss.detach() / self.gradient_accumulate_every
