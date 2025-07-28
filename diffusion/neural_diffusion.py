@@ -236,7 +236,7 @@ class DiTModel(nn.Module):
 
         self.t_embed = TimestepEmbedder(cfg)
         
-        self.null_context = nn.Parameter(torch.randn(1, cfg.num_latents, cfg.latent_dim))
+        # self.null_context = nn.Parameter(torch.randn(1, cfg.num_latents, cfg.latent_dim))
         
         self.blocks = nn.ModuleList([DiTBlock(cfg) for _ in range(cfg.num_layers)])
         self.proj_out = FinalLayer(cfg)
