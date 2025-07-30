@@ -189,25 +189,24 @@ class DiTBlock(nn.Module):
         # time embedding modulations 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(cfg.dim, 6 * cfg.dim, bias=True) # 6 for shift/scale for 3 LayerNorms
+            nn.Linear(cfg.dim, 4 * cfg.dim, bias=True) # 6 for shift/scale for 3 LayerNorms
         )
 
         # norms
         self.attn_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False) 
-        self.cattn_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False)
+        # self.cattn_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False)
         self.ff_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False) 
 
         self.attn = SelfAttention(cfg)
-        self.cross_attn = CrossAttention(cfg)
+        # self.cross_attn = CrossAttention(cfg)
         self.ff = FeedForward(cfg)
 
     def forward(self, 
                 x: torch.Tensor, 
-                t: torch.Tensor, 
-                ctx: torch.Tensor) -> torch.Tensor:
-        shift_msa, scale_msa, shift_ca, scale_ca, shift_ffn, scale_ffn = self.adaLN_modulation(t).chunk(6, dim=1)
+                t: torch.Tensor,) -> torch.Tensor:
+        shift_msa, scale_msa, shift_ca, scale_ca, shift_ffn, scale_ffn = self.adaLN_modulation(t).chunk(4, dim=1)
         x = x + self.attn(modulate(self.attn_norm(x), shift_msa, scale_msa))
-        x = x + self.cross_attn(modulate(self.cattn_norm(x), shift_ca, scale_ca), ctx) # Pass context here
+        # x = x + self.cross_attn(modulate(self.cattn_norm(x), shift_ca, scale_ca), ctx) # Pass context here
         x = x + self.ff(modulate(self.ff_norm(x), shift_ffn, scale_ffn))
         return x
         
@@ -232,7 +231,7 @@ class DiTModel(nn.Module):
         self.seq2seq = seq2seq
 
         self.proj_in = nn.Linear(cfg.latent_dim, cfg.dim)
-        self.ctx_proj = nn.Linear(cfg.latent_dim, cfg.dim)
+        # self.ctx_proj = nn.Linear(cfg.latent_dim, cfg.dim)
 
         self.t_embed = TimestepEmbedder(cfg)
         
@@ -242,16 +241,16 @@ class DiTModel(nn.Module):
         self.proj_out = FinalLayer(cfg)
 
     # TODO: change signature to handle ctx tensor: ctx: torch.Tensor
-    def forward(self, x: torch.Tensor, t: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         t = t.view(-1) 
         # ctx = repeat(self.null_context, '1 n d -> b n d', b=x.shape[0])
         
         x = self.proj_in(x)
-        ctx = self.ctx_proj(ctx)
+        # ctx = self.ctx_proj(ctx)
         
         t = self.t_embed(t)
         for block in self.blocks:
-            x = block(x, t, ctx)
+            x = block(x, t)
 
         x = self.proj_out(x, t)        
         return x
