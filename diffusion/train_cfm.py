@@ -90,8 +90,7 @@ def euler_solver(
     for t_step in range(t_steps.shape[0] - 1):
         t = t_steps[t_step] * torch.ones(x_0.shape[0], device=x_0.device)
         t = ConditionalFlowMatcher.pad_t_like_x(t, x)
-        dx = model(x, t, x_0)  # approx. trajectory step
-        # print(dx - x_0)
+        dx = model(x, t)  # approx. trajectory step
         x = x + dx * dt  # euler integrate
 
         if pbar is not None:
@@ -678,7 +677,7 @@ class Trainer(object):
 
                         x_0 = torch.randn_like(latent)
                         t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
-                        v_t = self.v_predictor(x_t, t, x_0)  # we need to condition on the initial conditions (x_0) for flow matching (bc it's an ode solver) 
+                        v_t = self.v_predictor(x_t, t)
                         loss = F.mse_loss(v_t.float(), u_t.float())
                         
                         total_loss += loss.detach() / self.gradient_accumulate_every
@@ -743,10 +742,10 @@ class Trainer(object):
                                 x_0 = torch.randn_like(latent)
                                 t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
                                 
-                                v_t = self.v_predictor(x_t, t, x_0)
+                                v_t = self.v_predictor(x_t, t)
                                 total_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
 
-                                v_t = self.ema_model(x_t, t, x_0)
+                                v_t = self.ema_model(x_t, t)
                                 total_ema_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
 
                             last_val_loss = total_val_loss / num_val_batches
