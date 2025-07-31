@@ -476,7 +476,7 @@ class Trainer(object):
 
         for _ in range(num_val_batches):
             val_data = {k: v.to(device) for k, v in next(self.val_iter).items()}
-            losses = model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"])
+            losses = model.autoencode(val_data["input_ids"], attn_mask=val_data["attention_mask"], mu_only = False)
             
             val_loss = losses['reconstruction_loss'] + self.get_annealed_kld_weight() * losses['kld_loss']
             total_val_loss += val_loss.item()
@@ -517,12 +517,12 @@ class Trainer(object):
         embeddings = model.embed(input_ids)
         attn_mask = val_data.get("attention_mask", torch.ones_like(input_ids))[:self.cfg.training.eval_bs]
         
-        recon_embeds, _, _ = model.vae(embeddings, attn_mask.bool())
+        recon_embeds, _, _ = model.vae(embeddings, attn_mask.bool(), mu_only = True)
         recon_logits = model.dembed_head(recon_embeds[..., :input_ids.shape[1], :])
         recon_ids = torch.argmax(recon_logits, dim=-1)
 
-        original_texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-        reconstructed_texts = self.tokenizer.batch_decode(recon_ids, skip_special_tokens=True)
+        original_texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens = True)
+        reconstructed_texts = self.tokenizer.batch_decode(recon_ids, skip_special_tokens = True)
 
         recon_table = wandb.Table(columns=["Original", "Reconstructed"])
         for orig, recon in zip(original_texts, reconstructed_texts):

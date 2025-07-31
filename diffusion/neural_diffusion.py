@@ -92,18 +92,7 @@ class TimestepEmbedder(nn.Module):
         return self.mlp(t_freq)
 
 
-class InputProjector(nn.Module):
-    def __init__(self, cfg: DiTConfig):
-        super().__init__()
-        self.proj = nn.Linear(cfg.latent_dim, cfg.dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, cfg.num_latents, cfg.dim)) # TODO maybe remove this?
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
-        x = x + self.pos_embed
-        return x
-
-# TODO fuse the two Attns to be Perceiver-Styled for  
+# TODO fuse the two Attns to be Perceiver-Styled
 class SelfAttention(nn.Module):
     def __init__(self, cfg: DiTConfig):
         super().__init__()
@@ -132,8 +121,10 @@ class CrossAttention(nn.Module):
         super().__init__()
         self.num_heads, self.head_dim = cfg.num_heads, cfg.dim // cfg.num_heads
         self.scale = self.head_dim ** -0.5
+        
         self.proj_q = nn.Linear(cfg.dim, cfg.dim, bias=False)
         self.proj_kv = nn.Linear(cfg.dim, 2 * cfg.dim, bias=False)
+        
         self.proj_o = nn.Linear(cfg.dim, cfg.dim)
 
         self.rope = RoPE(dim=self.head_dim, cfg=cfg)
@@ -149,69 +140,74 @@ class CrossAttention(nn.Module):
         q, k = self.rope(q, k)
         
         sim = (q @ k.transpose(-2, -1)) * self.scale
-        attn = sim.softmax(dim=-1) @ v
+        attn = sim.softmax(dim = -1) @ v
         x = rearrange(attn, 'b h n d -> b n (h d)')
         return self.proj_o(x)
 
 
 class FeedForward(nn.Module):
+
     def __init__(self, cfg: DiTConfig) -> None:
         super().__init__()
         hidden_dim = int(cfg.dim * cfg.expansion_factor)
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, cfg.dim)
-        )
+        self.proj_up = nn.Linear(cfg.dim, hidden_dim) 
+        self.proj_down = nn.Linear(hidden_dim, cfg.dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor: 
-        return self.mlp(x)
-        
+        return self.proj_down(torch.nn.functional.gelu(self.proj_up(x))) # seems that gelu is >> better than relu^2
+
+
+class FinalLayer(nn.Module):
+    """ The final layer of DiT. """
+    def __init__(self, cfg: DiTConfig):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(cfg.dim, elementwise_affine=False, eps=1e-6)
+        self.proj_out = nn.Linear(cfg.dim, cfg.latent_dim, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cfg.dim, 2 * cfg.dim, bias=True)
+        )
+
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = modulate(self.norm_final(x), shift, scale)
+        x = self.proj_out(x)
+        return x
 
 
 def modulate(x, shift, scale):
-    """Modulates the input tensor `x` using learned shift and scale."""
+    """ modulates the input tensor `x` using learned shift and scale. """
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
+
 class DiTBlock(nn.Module):
-    """A DiT block with self-attention, cross-attention, and adaLN modulation."""
+    """ DiT block with self-attention, cross-attention, and adaLN modulation """
     def __init__(self, cfg: DiTConfig):
         super().__init__()
 
+
+        # time embedding modulations 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(cfg.dim, 9 * cfg.dim, bias=True)
+            nn.Linear(cfg.dim, 4 * cfg.dim, bias=True) # 6 for shift/scale for 3 LayerNorms
         )
 
-        self.norm1 = nn.LayerNorm(cfg.dim, elementwise_affine=False) 
-        self.norm2 = nn.LayerNorm(cfg.dim, elementwise_affine=False)
-        self.norm3 = nn.LayerNorm(cfg.dim, elementwise_affine=False) 
+        # norms
+        self.attn_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False) 
+        # self.cattn_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False)
+        self.ff_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False) 
 
         self.attn = SelfAttention(cfg)
-        self.cross_attn = CrossAttention(cfg)
+        # self.cross_attn = CrossAttention(cfg)
         self.ff = FeedForward(cfg)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        
-        params = self.adaLN_modulation(t)
-        params = params.chunk(9, dim=-1)
-        shift_sa, scale_sa, gate_sa, shift_ca, scale_ca, gate_ca, shift_ff, scale_ff, gate_ff = params
-        
-        x_res = x
-        x_norm = modulate(self.norm1(x), shift_sa, scale_sa)
-        
-        x_sa = self.attn(x_norm)
-        x = x_res + gate_sa.unsqueeze(1) * x_sa
-
-        x_res = x
-        x_norm = modulate(self.norm2(x), shift_ca, scale_ca)
-        x_ca = self.cross_attn(x_norm, ctx) # Pass context here
-        x = x_res + gate_ca.unsqueeze(1) * x_ca
-
-        x_res = x
-        x_norm = modulate(self.norm3(x), shift_ff, scale_ff)
-        x_ff = self.ff(x_norm)
-        x = x_res + gate_ff.unsqueeze(1) * x_ff
+    def forward(self, 
+                x: torch.Tensor, 
+                t: torch.Tensor,) -> torch.Tensor:
+        shift_msa, scale_msa, shift_ca, scale_ca, shift_ffn, scale_ffn = self.adaLN_modulation(t).chunk(4, dim=1)
+        x = x + self.attn(modulate(self.attn_norm(x), shift_msa, scale_msa))
+        # x = x + self.cross_attn(modulate(self.cattn_norm(x), shift_ca, scale_ca), ctx) # Pass context here
+        x = x + self.ff(modulate(self.ff_norm(x), shift_ffn, scale_ffn))
         return x
         
 
@@ -234,38 +230,30 @@ class DiTModel(nn.Module):
         self.num_classes = num_classes
         self.seq2seq = seq2seq
 
-        self.input_proj = InputProjector(cfg)
-        self.ctx_proj = InputProjector(cfg)
+        self.proj_in = nn.Linear(cfg.latent_dim, cfg.dim)
+        # self.ctx_proj = nn.Linear(cfg.latent_dim, cfg.dim)
 
         self.t_embed = TimestepEmbedder(cfg)
         
-        self.null_context = nn.Parameter(torch.randn(1, cfg.num_latents, cfg.latent_dim))
+        # self.null_context = nn.Parameter(torch.randn(1, cfg.num_latents, cfg.latent_dim))
         
         self.blocks = nn.ModuleList([DiTBlock(cfg) for _ in range(cfg.num_layers)])
-        
-        self.norm_out = nn.LayerNorm(cfg.dim, elementwise_affine=False)
-        self.proj_out = nn.Linear(cfg.dim, cfg.latent_dim, bias=True)
+        self.proj_out = FinalLayer(cfg)
 
-
-
-    # t: torch.Tensor, ctx: torch.Tensor
+    # TODO: change signature to handle ctx tensor: ctx: torch.Tensor
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         t = t.view(-1) 
-        ctx = repeat(self.null_context, '1 n d -> b n d', b=x.shape[0])
+        # ctx = repeat(self.null_context, '1 n d -> b n d', b=x.shape[0])
         
-        x = self.input_proj(x)
-        ctx = self.ctx_proj(ctx)
+        x = self.proj_in(x)
+        # ctx = self.ctx_proj(ctx)
         
         t = self.t_embed(t)
         for block in self.blocks:
-            x = block(x, t, ctx)
+            x = block(x, t)
 
-        x = self.norm_out(x)
-        x = self.proj_out(x)
-        
+        x = self.proj_out(x, t)        
         return x
-
-
 
 
 

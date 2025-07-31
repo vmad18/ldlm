@@ -266,9 +266,9 @@ class VariationalAutoEncoder(nn.Module):
         
         return mu, log_var
 
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, only_mu: bool = False) -> torch.Tensor:
+    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
         """Reparameterizes the latent space. If only_mu is True, returns the mean."""
-        if only_mu:
+        if mu_only:
             return mu
         std = torch.exp(0.5 * log_var)  
         eps = torch.randn_like(std)     
@@ -298,9 +298,9 @@ class VariationalAutoEncoder(nn.Module):
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
     
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
-        z = self.reparameterize(mu, log_var)
+        z = self.reparameterize(mu, log_var, mu_only)
         recon_x = self.decode(z)
         return recon_x, mu, log_var
 

@@ -79,7 +79,11 @@ def default(val, d):
     return d() if callable(d) else d
 
 
-def euler_solver(x_0, t_steps: torch.Tensor, model: DiTModel, pbar=None):
+def euler_solver(
+                x_0: torch.Tensor, 
+                t_steps: torch.Tensor, 
+                model: DiTModel, 
+                pbar=None):
     x = x_0
     dt = t_steps[1] - t_steps[0]
 
@@ -91,7 +95,6 @@ def euler_solver(x_0, t_steps: torch.Tensor, model: DiTModel, pbar=None):
 
         if pbar is not None:
             pbar.update(1)
-
     return x
 
 
@@ -107,13 +110,12 @@ def gen_samples(
     # The caller of this function should handle model.eval() and model.train()
     with torch.no_grad():
         x_0 = torch.randn((batch_size, num_latents, dim_latents), device=accelerator.device, dtype=target_dtype)
-        t_steps = torch.linspace(0, 1, steps, device=accelerator.device)
+        t_steps = torch.linspace(0, 1, steps + 1, device=accelerator.device)
 
         if method == "euler":
             traj = euler_solver(x_0, t_steps, model, None)
         else:
             raise NotImplementedError
-
     return traj
 
 
@@ -146,7 +148,7 @@ def get_adamw_optimizer(params, lr, betas, weight_decay, eps=1e-8):
 
 
 def ema(source: nn.Module, target: nn.Module, decay: float):
-    """ EMA update """
+    """ ema update """
     source_dict = source.state_dict()
     target_dict = target.state_dict()
 
@@ -157,7 +159,10 @@ def ema(source: nn.Module, target: nn.Module, decay: float):
 class Trainer(object):
 
     @classmethod
-    def from_pretrained_for_generation(cls, checkpoint_dir: str, mixed_precision: str = "bf16"):
+    def from_pretrained_for_generation(
+                                cls, 
+                                checkpoint_dir: str, 
+                                mixed_precision: str = "bf16"):
         """
         Loads a pre-trained model from a checkpoint directory for generation.
         This is a factory method that constructs a trainer in "generation mode"
@@ -170,25 +175,26 @@ class Trainer(object):
         model_files = list(checkpoint_dir.glob('model-*.pt')) + list(checkpoint_dir.glob('model.pt'))
         if not model_files:
             raise FileNotFoundError(f"No diffusion model checkpoint found in {checkpoint_dir}")
+        
         model_checkpoint_path = max(model_files, key=os.path.getctime)
         print(f"Loading diffusion model checkpoint from: {model_checkpoint_path}")
         data = torch.load(model_checkpoint_path, map_location='cpu', weights_only=False)
         
-        if 'args' not in data:
-            raise ValueError(f"Checkpoint {model_checkpoint_path} does not contain 'args'. Cannot restore model.")
-        args = data['args']
+        if 'cfg' not in data:
+            raise ValueError(f"Checkpoint {model_checkpoint_path} does not contain 'cfg'. Cannot restore model.")
+        args = data['cfg']
 
         # --- 2. Create a bare Trainer instance and Accelerator ---
         trainer = cls.__new__(cls)
         trainer.accelerator = Accelerator(mixed_precision=mixed_precision)
         
-        assert self.accelerator.num_processes == 1, "Multi-gpu training is no bueno rn"
+        assert trainer.accelerator.num_processes == 1, "Multi-gpu training is no bueno rn"
         print(
-            f"Accelerator (RANK: {self.accelerator.process_index}, "
-            f"LOCAL_RANK: {self.accelerator.local_process_index}, "
-            f"WORLD_SIZE: {self.accelerator.num_processes}) - "
-            f"Mixed Precision: {self.accelerator.mixed_precision}, "
-            f"Device: {self.accelerator.device}, "
+            f"Accelerator (RANK: {trainer.accelerator.process_index}, "
+            f"LOCAL_RANK: {trainer.accelerator.local_process_index}, "
+            f"WORLD_SIZE: {trainer.accelerator.num_processes}) - "
+            f"Mixed Precision: {trainer.accelerator.mixed_precision}, "
+            f"Device: {trainer.accelerator.device}, "
         )
         # these have no setters and are not constructor args (straight to jail)
         # self.accelerator.local_process_index = os.getenv("LOCAL_RANK", 0)
@@ -214,6 +220,7 @@ class Trainer(object):
         # --- 4. Manually Set Up Diffusion Model ---
         trainer.num_latents = trainer.ae.num_latents
         trainer.latent_dim = trainer.ae.latent_dim
+        
         cfg_dit = DiTConfig()
         cfg_dit.dim = args.model_dim
         cfg_dit.num_latents = trainer.num_latents
@@ -238,7 +245,6 @@ class Trainer(object):
         
         # --- 6. Load the Model Weights ---
         trainer.load_for_generation(model_checkpoint_path)
-        
         return trainer
 
     def __init__(self,
@@ -361,7 +367,7 @@ class Trainer(object):
                 init_kwargs={"wandb": wandb_init_kwargs}
             )
 
-        print("Creating ConditionalFlowMatcher")
+        print("==> Creating ConditionalFlowMatcher...")
         self.fm = ConditionalFlowMatcher()
 
         cfg_dit = DiTConfig()
@@ -466,10 +472,12 @@ class Trainer(object):
         if cfg.general.get('checkpoint_path') is not None:
             if self.accelerator.is_main_process:
                 print(f"Loading checkpoint from: {cfg.general.checkpoint_path}")
+                print(f"Successfully Loaded CFM checkpoint!")
             self.load_from_checkpoint(cfg.general.checkpoint_path, resume_training=True)
         elif cfg.general.resume_training and cfg.general.resume_dir is not None:
             if self.accelerator.is_main_process:
                 print(f"Resuming training from: {cfg.general.resume_dir}")
+                print(f"Successfully Loaded CFM checkpoint!")
             checkpoint_file = Path(cfg.general.resume_dir) / 'model.pt'
             if checkpoint_file.exists():
                 self.load_for_training(str(checkpoint_file), resume_training=True)
@@ -510,7 +518,7 @@ class Trainer(object):
                     self.step,
                     rank,
                     world_size,
-                    tokenizer=self.tokenizer
+                    tokenizer = self.tokenizer
                 )
                 
                 # For validation, we don't need to wind (always start from beginning)
@@ -532,7 +540,7 @@ class Trainer(object):
             
         self.best_val_loss = float('inf')
 
-    def save(self, file_name='model.pt'):
+    def save(self, file_name='model.pt') -> None:
         if not self.accelerator.is_main_process:
             return
 
@@ -554,7 +562,7 @@ class Trainer(object):
         # We don't need to re-save the VAE, it's already in its own directory
         print(f'Saved diffusion model checkpoint to {model_save_path}')
 
-    def load_for_generation(self, file_path):
+    def load_for_generation(self, file_path) -> None:
         """Load model for generation/inference only."""
         data = torch.load(file_path, map_location="cpu", weights_only=False)
 
@@ -575,7 +583,7 @@ class Trainer(object):
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
 
-    def load_for_training(self, file_path, resume_training=False):
+    def load_for_training(self, file_path, resume_training=False) -> None:
         """Load model for training with full state restoration."""
         data = torch.load(file_path, map_location="cpu", weights_only=False)
 
@@ -619,7 +627,7 @@ class Trainer(object):
         if self.accelerator.is_main_process:
             print("Checkpoint loading complete.")
 
-    def load_from_checkpoint(self, checkpoint_path, resume_training=False):
+    def load_from_checkpoint(self, checkpoint_path, resume_training=False) -> None:
         """Load model from external checkpoint directory."""
         checkpoint_path = Path(checkpoint_path)
         
@@ -764,11 +772,11 @@ class Trainer(object):
                     self.step += 1
                     pbar.update(1)
 
-                    if accelerator.is_main_process and self.step > 0 and self.step % self.save_and_sample_every == 0:
+                    if accelerator.is_main_process and self.step > 0 and (self.step % self.save_and_sample_every == 0):
                         self.eval()
 
     @torch.no_grad()
-    def eval(self) -> None:
+    def eval(self, verbose: bool = False) -> None:
         accelerator = self.accelerator
         model_for_generation = self.accelerator.unwrap_model(self.ema_model)
         model_for_generation.eval()
@@ -797,6 +805,12 @@ class Trainer(object):
 
             decoded_batch = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
             generated_texts.extend(decoded_batch)
+
+            if verbose: 
+                for idx, decoded in enumerate(decoded_batch):
+                    print(f"Sample {idx}: {decoded}")
+                    print()
+                    print()
 
             try:
                 table = wandb.Table(columns=["step", "sample_id", "generated_text"])
