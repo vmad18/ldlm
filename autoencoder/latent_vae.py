@@ -139,9 +139,10 @@ def get_latent_vae_tokenizer(model_cfg) -> Tuple[LatentVAEModel, PreTrainedToken
     # TODO: do we need this? jwk: according to stacktrace later, yes? 
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-    
+    def next_multiple_of_n(v: float | int, *, n: int):
+        return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
     vae = LatentVAEModel(
-        vocab_size = len(tokenizer),
+        vocab_size = next_multiple_of_n(len(tokenizer), n=128),
         d_model = model_cfg.d_model, 
         latent_dim = model_cfg.latent_dim, 
         num_latents = model_cfg.num_latents, 

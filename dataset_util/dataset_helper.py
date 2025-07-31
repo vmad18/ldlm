@@ -594,7 +594,7 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
         # New flattened structure
         train_bs = cfg.train_bs
         grad_accumulate = cfg.grad_accumulate
-        max_seq_len = cfg.model_config.max_seq_len
+        max_seq_len = cfg.model.max_seq_len
     
     # Total tokens consumed = step * batch_size * grad_accumulate * world_size * seq_len
     total_tokens_consumed = step * train_bs * grad_accumulate * world_size * max_seq_len
@@ -620,8 +620,13 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
                 tokens_consumed += shard_size
                 file_idx += 1
             else:
-                # This shard contains our target position - calculate exact position within the file
-                start_pos = total_tokens_consumed - tokens_consumed
+                # This shard contains our target position - calculate exact position within the file.
+                # Align `start_pos` to the nearest batch boundary so that all ranks
+                # start reading on a token index that is a multiple of
+                #   world_size * train_bs * seq_len
+                remainder = (total_tokens_consumed - tokens_consumed)
+                tokens_per_global_batch = train_bs * grad_accumulate * world_size * max_seq_len
+                start_pos = remainder - (remainder % tokens_per_global_batch)
                 break
         except Exception as e:
             print(f"Error reading shard {files[file_idx]}: {e}")
@@ -704,7 +709,7 @@ def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: i
     else:
         # New flattened structure
         batch_size = cfg.train_bs
-        sequence_length = cfg.model_config.max_seq_len
+        sequence_length = cfg.model.max_seq_len
     
     return distributed_data_generator(
         filename_pattern=filename_pattern,
@@ -741,7 +746,7 @@ def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_siz
     else:
         # New flattened structure
         batch_size = cfg.eval_bs
-        sequence_length = cfg.model_config.max_seq_len
+        sequence_length = cfg.model.max_seq_len
     
     return distributed_data_generator(
         filename_pattern=filename_pattern,

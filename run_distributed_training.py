@@ -18,45 +18,9 @@ import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from autoencoder.train_lvae_distributed import main, TrainingConfig
+from autoencoder.train_lvae_distributed import main
 
 print(f"Importing complete in run_distributed_training.py", flush=True)
-
-def create_training_config(cfg: DictConfig) -> TrainingConfig:
-    """Create TrainingConfig from Hydra configuration"""
-    
-    # Extract model config
-    model_cfg = cfg.model
-    
-    # Create training configuration
-    training_cfg = TrainingConfig(
-        model_config=model_cfg,  # Changed back to model_config
-        train_num_steps=cfg.train_num_steps,
-        train_bs=cfg.train_bs,
-        eval_bs=cfg.eval_bs,
-        eval_every=cfg.eval_every,
-        grad_accumulate=cfg.grad_accumulate,
-        train_bin_pattern=cfg.train_bin_pattern,
-        val_bin_pattern=cfg.val_bin_pattern,
-        total_tokens=cfg.get('total_tokens', 100_000_000_000),
-        learning_rate=cfg.learning_rate,
-        adam_betas=(cfg.adam_beta1, cfg.adam_beta2),
-        adam_weight_decay=cfg.adam_weight_decay,
-        adam_eps=cfg.get('adam_eps', 1e-8),
-        muon_lr=cfg.muon_lr,
-        muon_momentum=cfg.muon_momentum,
-        kld_weight=cfg.kld_weight,
-        kld_annealing_steps=cfg.get('kld_annealing_steps', 2000),
-        seed=cfg.get('seed', 42),
-        log_step_interval=cfg.get('log_step_interval', 50),
-        output_dir=cfg.get('output_dir', 'outputs'),
-        wandb_name=cfg.get('wandb_name', None),
-        save_checkpoint=cfg.get('save_checkpoint', True),
-        resume_from=cfg.get('resume_from', None),
-        per_process_vram_ratio=cfg.get('per_process_vram_ratio', None),
-    )
-    
-    return training_cfg
 
 @hydra.main(version_base=None, config_path="conf", config_name="train_lvae_dist")
 def main_script(cfg: DictConfig) -> None:
@@ -94,11 +58,8 @@ def main_script(cfg: DictConfig) -> None:
     # We're in distributed environment, run training
     print("Running distributed training...")
     
-    # Create training configuration
-    training_cfg = create_training_config(cfg)
-    
-    # Run training
-    best_val_loss = main(training_cfg)
+    # Run training directly with Hydra config
+    best_val_loss = main(cfg)
     print(f"Training completed. Best validation loss: {best_val_loss:.4f}")
 
 if __name__ == "__main__":
