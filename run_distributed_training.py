@@ -18,7 +18,7 @@ import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from autoencoder.train_lvae_distributed import main
+from autoencoder.train_distributed import main
 
 print(f"Importing complete in run_distributed_training.py", flush=True)
 

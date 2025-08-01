@@ -204,7 +204,7 @@ class DiTBlock(nn.Module):
     def forward(self, 
                 x: torch.Tensor, 
                 t: torch.Tensor,) -> torch.Tensor:
-        shift_msa, scale_msa, shift_ca, scale_ca, shift_ffn, scale_ffn = self.adaLN_modulation(t).chunk(4, dim=1)
+        shift_msa, scale_msa, shift_ffn, scale_ffn = self.adaLN_modulation(t).chunk(4, dim=1)
         x = x + self.attn(modulate(self.attn_norm(x), shift_msa, scale_msa))
         # x = x + self.cross_attn(modulate(self.cattn_norm(x), shift_ca, scale_ca), ctx) # Pass context here
         x = x + self.ff(modulate(self.ff_norm(x), shift_ffn, scale_ffn))

@@ -8,17 +8,15 @@ defaults:
 _target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
 
 # Your cluster-specific SLURM parameters
-timeout_min: 1440
+timeout_min: 60
 nodes: 1
 tasks_per_node: 1
-cpus_per_task: 24
+cpus_per_task: 12
 mem_gb: 64
-gres: "gpu:1" # Using gres directly as in the example
+gres: "gpu:4" # Using gres directly as in the example
 constraint: "gpu80"
 name: ${hydra.job.name}
-# Disable requeueing on preemption or timeout
-max_num_timeout: 0
+# Enable automatic resubmission on timeout (will resubmit up to 10 times)
+max_num_timeout: 10
 setup:
-  - "module purge"
-  - "module load anaconda3/2024.10"
   - "source /scratch/gpfs/ashwinee/new/activate.sh" 
