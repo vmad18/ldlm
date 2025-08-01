@@ -27,7 +27,7 @@ QOS = "pbatch"
 BANK = "guests"
 # BANK = "effml"
 
-TIME_LIMIT = 59  # in minutes
+TIME_LIMIT = 30  # in minutes
 # TIME_LIMIT = 15
 # TIME_LIMIT = 1440 
 
@@ -52,6 +52,8 @@ TGT_TOKENS = 100e9
 # arg list is:
 # script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr, ...
 exp_list = [
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 1, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4],
     ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4],
 ]
 
@@ -103,6 +105,10 @@ for exp in final_exp_list:
 
     # join to a unique run name for the experiment
     run_name = f"{cfg_name}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
+
+    # last thing, add our manual result dir
+    res_folder = f"{BASE_OUT_DIR}/{BASE_RUN_NAME}/{run_name}"
+    cli_args += f" results_folder={res_folder}"
 
     # put together the actual "train.py" command
     custom_invocation = f"{INVOCATION_PREAMBLE} {script} {cli_args}"
