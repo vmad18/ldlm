@@ -364,13 +364,14 @@ def main(cfg: DictConfig):
     cfg_hash = hashlib.md5(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()
     results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / cfg_hash
     
+    # Check if we should auto-resume from existing checkpoint
+    if cfg.resume_from is None and results_folder.exists():
+        potential_checkpoint = results_folder / "model_best.pt"
+        if potential_checkpoint.exists():
+            cfg.resume_from = str(results_folder)
+            print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
+
     if master_process:
-        # Check if we should auto-resume from existing checkpoint
-        if cfg.resume_from is None and results_folder.exists():
-            potential_checkpoint = results_folder / "model_best.pt"
-            if potential_checkpoint.exists():
-                cfg.resume_from = str(results_folder)
-                print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
         
         results_folder.mkdir(parents=True, exist_ok=True)
         
@@ -514,19 +515,19 @@ def main(cfg: DictConfig):
     for n, p in model.named_parameters():
         if "dembed_head" in n:
             head_params.append(p)
-            print0(f"Head param: {n}, Shape: {p.shape}", logfile, console=True)
+            # print0(f"Head param: {n}, Shape: {p.shape}", logfile, console=True)
         elif "pos_embed" in n:
             pos_embed_params.append(p)
-            print0(f"Pos embed param: {n}, Shape: {p.shape}", logfile, console=True)
+            # print0(f"Pos embed param: {n}, Shape: {p.shape}", logfile, console=True)
         elif "embed" in n:
             embed_params.append(p)
-            print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
+            # print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
         elif p.ndim >= 2:
             hidden_matrix_params.append(p)
-            print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
+            # print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
         elif p.ndim < 2:
             scalar_params.append(p)
-            print0(f"Scalar param: {n}, Shape: {p.shape}", logfile, console=True)
+            # print0(f"Scalar param: {n}, Shape: {p.shape}", logfile, console=True)
 
     optimizer_adam = DistAdam(scalar_params + head_params + embed_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
     optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
@@ -545,35 +546,18 @@ def main(cfg: DictConfig):
         training_time_ms = data['training_time_ms']
         
         # Try to load per-rank optimizer states
-        per_rank_optimizer_path = checkpoint_path / f"optimizer_rank{rank}.pt"
         per_rank_best_optimizer_path = checkpoint_path / f"optimizer_best_rank{rank}.pt"
         
-        optimizer_loaded = False
+        optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
         
-        # Try to load best optimizer states first if they exist
-        if per_rank_best_optimizer_path.exists() and checkpoint_file.name == 'model_best.pt':
-            optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
-            
-            optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
-            optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
-            optimizer_loaded = True
+        optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
+        optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
 
-            if optimizer_loaded:
-                print(f"Loaded best per-rank optimizer states for rank {rank}")
+        print(f"Loaded best per-rank optimizer states for rank {rank}")
 
-        # Try to load regular per-rank optimizer states if best didn't work
-        if not optimizer_loaded and per_rank_optimizer_path.exists():
-            optimizer_data = torch.load(str(per_rank_optimizer_path), map_location=device, weights_only=False)
-            
-            optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
-            optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
-            optimizer_loaded = True
         optimizer_adam.zero_grad(set_to_none=True)
         optimizer_muon.zero_grad(set_to_none=True)
-    
-        if not optimizer_loaded:
-            print0("WARNING: Could not load optimizer states, starting with fresh optimizer state", logfile, console=True)
-        
+
         print0(f"Checkpoint loaded successfully. Resuming from step {step}", logfile, console=True)
     
     # Setup data loaders AFTER checkpoint loading so we can wind to correct position
