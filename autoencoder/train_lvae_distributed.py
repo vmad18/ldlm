@@ -215,136 +215,10 @@ def set_seeds(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-def separate_weight_decayable_params(params):
-    # Exclude affine params in norms (e.g. LayerNorm, GroupNorm, etc.) and bias terms
-    no_wd_params = [param for param in params if param.ndim < 2]
-    wd_params = [param for param in params if param not in set(no_wd_params)]
-    return wd_params, no_wd_params
-
-def get_adamw_optimizer(params, lr, betas, weight_decay, eps=1e-8):
-    params = list(params)
-    wd_params, no_wd_params = separate_weight_decayable_params(params)
-
-    param_groups = [
-        {'params': wd_params},
-        {'params': no_wd_params, 'weight_decay': 0},
-    ]
-    return AdamW(param_groups, lr=lr, weight_decay=weight_decay, betas=betas, eps=eps)
-
 def compute_grad_norm(parameters):
     parameters = [p for p in parameters if p.grad is not None]
     total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), p=2) for p in parameters]), p=2).item()
     return total_norm
-
-# Gradient bucketing system (adapted from train_gpt.py)
-def create_buckets(params, bucket_size_mb=25):
-    """Group parameters into buckets of approximately bucket_size_mb MB each"""
-    buckets = []
-    current_bucket = []
-    current_size = 0
-
-    # Sort parameters by size (largest first) for better bucketing
-    sorted_params = sorted(params, key=lambda p: p.numel(), reverse=True)
-
-    for param in sorted_params:
-        param_size_mb = param.numel() * param.element_size() / (1024 * 1024)
-
-        if current_size + param_size_mb > bucket_size_mb and current_bucket:
-            buckets.append(current_bucket)
-            current_bucket = [param]
-            current_size = param_size_mb
-        else:
-            current_bucket.append(param)
-            current_size += param_size_mb
-
-    if current_bucket:
-        buckets.append(current_bucket)
-
-    return buckets
-
-def load_from_checkpoint(checkpoint_path, model, optimizer_adam, optimizer_muon, device, rank):
-    """Load model and optimizers from external checkpoint directory."""
-    checkpoint_path = Path(checkpoint_path)
-    
-    # Try to load from model_best.pt first, then model.pt
-    checkpoint_file = None
-    for filename in ['model_best.pt', 'model.pt']:
-        potential_path = checkpoint_path / filename
-        if potential_path.exists():
-            checkpoint_file = potential_path
-            break
-    
-    if checkpoint_file is None:
-        raise FileNotFoundError(f"No checkpoint file (model_best.pt or model.pt) found in {checkpoint_path}")
-    
-    if rank == 0:
-        print(f"Loading checkpoint from: {checkpoint_file}")
-    
-    # Load checkpoint data
-    data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
-    
-    # Unwrap model if it's compiled or wrapped
-    unwrapped_model = model
-    if hasattr(model, '_orig_mod'):
-        unwrapped_model = model._orig_mod
-    
-    # Load model state
-    if 'model' in data:
-        unwrapped_model.load_state_dict(data['model'])
-        if rank == 0:
-            print("Successfully loaded model weights from 'model' key.")
-    else:
-        # Handle case where checkpoint is just the state_dict
-        unwrapped_model.load_state_dict(data)
-        if rank == 0:
-            print("Loaded model weights from raw state_dict.")
-    
-    # Initialize step and best_val_loss
-    step = 0
-    best_val_loss = float('inf')
-    
-    # Load training state
-    if 'step' in data:
-        step = data['step']
-        if rank == 0:
-            print(f"Resuming from step: {step}")
-    
-    optimizer_adam.load_state_dict(data['optimizer_adam'])
-    optimizer_muon.load_state_dict(data['optimizer_muon'])
-    optimizer_adam.zero_grad()
-    optimizer_muon.zero_grad()
-    if rank == 0:
-        print("Loaded separate optimizer states.")
-    
-    if 'best_val_loss' in data:
-        best_val_loss = data['best_val_loss']
-        if rank == 0:
-            print(f"Best validation loss: {best_val_loss}")
-    
-    # Load training time
-    training_time_ms = data.get('training_time_ms', 0)
-    
-    # Restore RNG states for reproducibility
-    if 'rng_state' in data:
-        try:
-            rng_state = data['rng_state']
-            random.setstate(rng_state['python'])
-            np.random.set_state(rng_state['numpy'])
-            print(f"rng_state['torch'].dtype: {rng_state['torch'].dtype}")
-            print([state.dtype for state in rng_state['torch_cuda']])
-            torch.set_rng_state(rng_state['torch'].cpu().byte())  # Should now be ByteTensor
-            torch.cuda.set_rng_state_all([state.byte() for state in rng_state['torch_cuda']])  # Should now be list of ByteTensors
-            if rank == 0:
-                print("Restored RNG states for reproducibility.")
-        except Exception as e:
-            if rank == 0:
-                print(e)
-                print(f"Warning: Could not restore RNG states: {e}. Continuing with current RNG state.")
-    
-    if rank == 0:
-        print("Checkpoint loading complete.")
-    
-    return step, best_val_loss, training_time_ms
 
 def handle_checkpoint_config(cfg: DictConfig, rank: int):
     """Handle checkpoint loading and config merging (similar to train_lvae.py)."""
@@ -358,8 +232,7 @@ def handle_checkpoint_config(cfg: DictConfig, rank: int):
         if not config_path.exists():
             raise FileNotFoundError(f"Config file not found at {config_path}")
         
-        if rank == 0:
-            print(f"Loading config from checkpoint: {config_path}")
+        print0(f"Loading config from checkpoint: {config_path}")
         
         # Load the checkpoint config and use its model config
         checkpoint_cfg = OmegaConf.load(config_path)
@@ -371,21 +244,18 @@ def handle_checkpoint_config(cfg: DictConfig, rank: int):
             # If checkpoint config doesn't have model key, use the whole config as model config
             cfg.model = checkpoint_cfg
         
-        if rank == 0:
-            print("Using model architecture from checkpoint config")
+        print0("Using model architecture from checkpoint config")
     
     return cfg
 
-
-
-def print0(s, logfile=None, console=False):
+def print0(s, logfile=None, console=False, flush=False):
     """Print only from rank 0"""
     if dist.get_rank() == 0:
         if console:
-            print(s)
+            print(s, flush=flush)
         if logfile:
             with open(logfile, "a") as f:
-                print(s, file=f)
+                print(s, file=f, flush=flush)
 
 def main(cfg: DictConfig):
 
@@ -418,11 +288,11 @@ def main(cfg: DictConfig):
     # idk, @jog did it this way back in summer of 24' so that's good enough for me.
     torch.cuda.set_device(device)
 
-    if master_process: print(f"{'#' * 80}", flush=True)
+    print0(f"{'#' * 80}", flush=True)
     dist.barrier()
     print(f"Distributed training initialized on rank ({rank}/{world_size}) as device={device} via {os.getenv("MASTER_ADDR", "null_badbad")}:{os.getenv("MASTER_PORT", "null_badbad")}",flush=True)
     dist.barrier()
-    if master_process: print(f"{'#' * 80}", flush=True)
+    print0(f"{'#' * 80}", flush=True)
 
     # On APUs like MI300A and GH200, gpu and cpu memory are shared and so both types of allocations
     # fight for the same space. Tends to make things behave/fail better when you cap useable vram.
@@ -431,7 +301,7 @@ def main(cfg: DictConfig):
             cfg.per_process_vram_ratio > 0.0 and cfg.per_process_vram_ratio < 1.0
         ), f"Invalid per_process_vram_ratio: {cfg.per_process_vram_ratio}, must be in (0.0, 1.0)"
         torch.cuda.set_per_process_memory_fraction(cfg.per_process_vram_ratio)
-        print(f"per_process_vram_ratio set to: {cfg.per_process_vram_ratio}")
+        print0(f"per_process_vram_ratio set to: {cfg.per_process_vram_ratio}")
     
     # Handle checkpoint config loading
     cfg = handle_checkpoint_config(cfg, rank)
@@ -441,10 +311,11 @@ def main(cfg: DictConfig):
     
     # Setup logging
     logfile = None
+    # All ranks need to know the results folder for saving per-rank optimizer states
+    cfg_hash = hashlib.md5(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()
+    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / cfg_hash
+    
     if master_process:
-        cfg_hash = hashlib.md5(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()
-        results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / cfg_hash
-        
         # Check if we should auto-resume from existing checkpoint
         if cfg.resume_from is None and results_folder.exists():
             potential_checkpoint = results_folder / "model_best.pt"
@@ -482,8 +353,7 @@ def main(cfg: DictConfig):
     training_time_ms = 0
     
     if cfg.resume_from is not None:
-        if master_process:
-            print0(f"Loading checkpoint from: {cfg.resume_from}", logfile, console=True)
+        print0(f"Loading checkpoint from: {cfg.resume_from}", logfile, console=True)
         
         # Load model state first, then recreate optimizers to avoid parameter reference issues
         checkpoint_path = Path(cfg.resume_from)
@@ -497,13 +367,12 @@ def main(cfg: DictConfig):
         if checkpoint_file is None:
             raise FileNotFoundError(f"No checkpoint file found in {checkpoint_path}")
         
-        # Load checkpoint data
+        # Load main checkpoint data
         data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
         
         # Load model state dict first (each rank loads the same state, so no broadcast needed)
         model.load_state_dict(data['model'])
-        if master_process:
-            print0("Loaded model state dict on all ranks", logfile, console=True)
+        print0("Loaded model state dict on all ranks", logfile, console=True)
 
     for param in model.parameters():
         dist.broadcast(param.detach(), 0)
@@ -513,24 +382,19 @@ def main(cfg: DictConfig):
     for n, p in model.named_parameters():
         if "dembed_head" in n:
             head_params.append(p)
-            if master_process:
-                print(f"Head param: {n}, Shape: {p.shape}")
+            print0(f"Head param: {n}, Shape: {p.shape}", logfile, console=True)
         elif "pos_embed" in n:
             pos_embed_params.append(p)
-            if master_process:
-                print(f"Pos embed param: {n}, Shape: {p.shape}")
+            print0(f"Pos embed param: {n}, Shape: {p.shape}", logfile, console=True)
         elif "embed" in n:
             embed_params.append(p)
-            if master_process:
-                print(f"Embed param: {n}, Shape: {p.shape}")
+            print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
         elif p.ndim >= 2:
             hidden_matrix_params.append(p)
-            if master_process:
-                print(f"Hidden matrix param: {n}, Shape: {p.shape}")
+            print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
         elif p.ndim < 2:
             scalar_params.append(p)
-            if master_process:
-                print(f"Scalar param: {n}, Shape: {p.shape}")
+            print0(f"Scalar param: {n}, Shape: {p.shape}", logfile, console=True)
 
     optimizer_adam = DistAdam(scalar_params + head_params + embed_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
     optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
@@ -552,25 +416,44 @@ def main(cfg: DictConfig):
         raise ValueError(f"Found {len(overlap)} overlapping parameters between Adam and Muon optimizers during checkpoint loading!")
 
     if cfg.resume_from is not None:
-        optimizer_adam.load_state_dict(data['optimizer_adam'])
-        optimizer_muon.load_state_dict(data['optimizer_muon'])
-        
-        if master_process:
-            print0("Recreated and loaded optimizer states", logfile, console=True)
-        
-        # Load other checkpoint data
         step = data['step']
         best_val_loss = data['best_val_loss']
         training_time_ms = data['training_time_ms']
         
-        if master_process:
-            print0(f"Checkpoint loaded successfully. Resuming from step {step}", logfile, console=True)
+        # Try to load per-rank optimizer states
+        per_rank_optimizer_path = checkpoint_path / f"optimizer_rank{rank}.pt"
+        per_rank_best_optimizer_path = checkpoint_path / f"optimizer_best_rank{rank}.pt"
+        
+        optimizer_loaded = False
+        
+        # Try to load best optimizer states first if they exist
+        if per_rank_best_optimizer_path.exists() and checkpoint_file.name == 'model_best.pt':
+            optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
+            optimizer_adam.load_state_dict(optimizer_data['optimizer_adam'])
+            optimizer_muon.load_state_dict(optimizer_data['optimizer_muon'])
+            optimizer_loaded = True
+            print(f"Loaded best per-rank optimizer states for rank {rank}")
+
+        # Try to load regular per-rank optimizer states if best didn't work
+        if not optimizer_loaded and per_rank_optimizer_path.exists():
+            optimizer_data = torch.load(str(per_rank_optimizer_path), map_location=device, weights_only=False)
+            optimizer_adam.load_state_dict(optimizer_data['optimizer_adam'])
+            optimizer_muon.load_state_dict(optimizer_data['optimizer_muon'])
+            optimizer_loaded = True
+
+        # Clear gradients regardless of whether optimizer states were loaded
+        optimizer_adam.zero_grad(set_to_none=True)
+        optimizer_muon.zero_grad(set_to_none=True)
+        
+        if not optimizer_loaded:
+            print0("WARNING: Could not load optimizer states, starting with fresh optimizer state", logfile, console=True)
+        
+        print0(f"Checkpoint loaded successfully. Resuming from step {step}", logfile, console=True)
     
     # Setup data loaders AFTER checkpoint loading so we can wind to correct position
     if cfg.resume_from is not None and step > 0:
         # We're resuming training, so wind the data generator to the correct position
-        if master_process:
-            print0(f"Winding data generator to step {step}", logfile, console=True)
+        print0(f"Winding data generator to step {step}", logfile, console=True)
         
         # Wind the training data generator
         train_loader = wind_data_generator(
@@ -616,8 +499,7 @@ def main(cfg: DictConfig):
         else:
             return cfg.kld_weight
 
-    if master_process:
-        print0("Starting training...", logfile, console=True)
+    print0("Starting training...", logfile, console=True)
     
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -667,6 +549,55 @@ def main(cfg: DictConfig):
             val_recon_loss = val_recon_loss_tensor.item()
             val_kld_loss = val_kld_loss_tensor.item()
             
+            # Check if this is a new best model (all ranks need to know)
+            is_new_best = val_loss < best_val_loss
+            if is_new_best:
+                best_val_loss = val_loss
+            
+            # Save checkpoint (all ranks participate in optimizer saving)
+            if cfg.save_checkpoint:
+                # Get the unwrapped model for saving
+                unwrapped_model = model
+                if hasattr(model, '_orig_mod'):
+                    unwrapped_model = model._orig_mod
+                
+                # Main checkpoint (saved only by rank 0, no optimizer states)
+                if master_process:
+                    checkpoint = {
+                        'step': step,
+                        'model': unwrapped_model.state_dict(),  # Save unwrapped model state
+                        'best_val_loss': best_val_loss,
+                        'val_loss': val_loss,
+                        'training_time_ms': training_time_ms,
+                        'rng_state': {
+                            'python': random.getstate(),
+                            'numpy': np.random.get_state(),
+                            'torch': torch.get_rng_state(),  # Ensure CPU tensor
+                            'torch_cuda': torch.cuda.get_rng_state_all(),  # Ensure CPU tensors
+                        }
+                    }
+                    
+                    torch.save(checkpoint, results_folder / "model.pt")
+                    
+                    if is_new_best:
+                        torch.save(checkpoint, results_folder / "model_best.pt")
+                        print0(f"New best val loss: {best_val_loss}")
+                
+                # Per-rank optimizer states (saved by each rank)
+                optimizer_checkpoint = {
+                    'optimizer_adam': optimizer_adam.state_dict(),
+                    'optimizer_muon': optimizer_muon.state_dict(),
+                    'rank': rank,
+                    'step': step  # For verification
+                }
+                
+                # Save per-rank optimizer states
+                torch.save(optimizer_checkpoint, results_folder / f"optimizer_rank{rank}.pt")
+                
+                # If this is the best model, also save best optimizer states
+                if is_new_best:
+                    torch.save(optimizer_checkpoint, results_folder / f"optimizer_best_rank{rank}.pt")
+            
             if master_process:
                 # Calculate progress
                 tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * cfg.model.max_seq_len
@@ -688,36 +619,9 @@ def main(cfg: DictConfig):
                     "training_time_ms": training_time_ms
                 }
                 
-                # Save checkpoint
-                if cfg.save_checkpoint:
-                    # Get the unwrapped model for saving
-                    unwrapped_model = model
-                    if hasattr(model, '_orig_mod'):
-                        unwrapped_model = model._orig_mod
-                    
-                    checkpoint = {
-                        'step': step,
-                        'model': unwrapped_model.state_dict(),  # Save unwrapped model state
-                        'optimizer_adam': optimizer_adam.state_dict(),
-                        'optimizer_muon': optimizer_muon.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'val_loss': val_loss,
-                        'training_time_ms': training_time_ms,
-                        'rng_state': {
-                            'python': random.getstate(),
-                            'numpy': np.random.get_state(),
-                            'torch': torch.get_rng_state(),  # Ensure CPU tensor
-                            'torch_cuda': torch.cuda.get_rng_state_all(),  # Ensure CPU tensors
-                        }
-                    }
-                    
-                    torch.save(checkpoint, results_folder / "model.pt")
-                    
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        torch.save(checkpoint, results_folder / "model_best.pt")
-                        logs['val/best_loss'] = best_val_loss
-                        print(f"New best val loss: {best_val_loss}")
+                # Update wandb logs if this is the best model
+                if cfg.save_checkpoint and is_new_best:
+                    logs['val/best_loss'] = best_val_loss
                 
                 # Generate samples for logging
                 if step % (cfg.eval_every * 2) == 0:
@@ -818,10 +722,14 @@ def main(cfg: DictConfig):
             # time_remaining_str = str(timedelta(milliseconds=int(time_remaining)))
             time_remaining_hrs = int(time_remaining) / 1e3 / 3600
             
+            # Get current momentum for logging (from first param group)
+            muon_momentum = optimizer_muon.param_groups[0]["momentum"] if optimizer_muon.param_groups else 0.0
+            adam_beta1 = optimizer_adam.param_groups[0]["betas"][0] if optimizer_adam.param_groups else 0.0
+            
             print0(f"step:{step+1}/{cfg.train_num_steps} loss:{total_loss:.4f} "
                    f"recon_loss:{total_recon_loss:.4f} kld_loss:{total_kld_loss:.4f} "
                    f"kld_weight:{current_kld_weight:.6f} grad_norm:{grad_norm:.4f} "
-                   f"lr:{current_lr:.6f} "
+                   f"lr:{current_lr:.6f} muon_momentum:{muon_momentum:.3f} "
                 #    f"train_time:{approx_training_time_ms:.0f}ms "
                 #    f"step_avg:{approx_training_time_ms/(step + 1):.2f}ms",
                     f"train_time:{approx_training_time_ms/1e3:.0f}s "
@@ -838,6 +746,8 @@ def main(cfg: DictConfig):
                     "train/kld_weight": current_kld_weight,
                     "train/grad_norm": grad_norm,
                     "train/lr": current_lr,
+                    "train/muon_momentum": muon_momentum,
+                    "train/adam_beta1": adam_beta1,
                     "step": step,
                     "epoch": epoch,
                     "samples": tokens_processed,
