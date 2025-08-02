@@ -1,0 +1,61 @@
+# @package _global_
+# Distributed LVAE training configuration for Hydra
+
+
+# Model configuration
+model:
+  vocab_size: 50257
+  d_model: 768
+  latent_dim: 2048
+  num_latents: 1
+  dim_head: 128
+  max_seq_len: 128
+  num_layers: 12
+  tokenizer_name: "gpt2"
+
+# Training configuration
+train_num_steps: 100000
+train_bs: 256
+eval_bs: 256
+eval_every: 500
+grad_accumulate: 8
+compile_model: true
+resume_from: null
+results_folder: null
+
+# Data configuration
+train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
+val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
+total_tokens: 100000000000  # 100B tokens
+
+# Optimization configuration
+learning_rate: 1e-4
+adam_betas: [0.9, 0.95]  # Changed from separate adam_beta1/adam_beta2 to tuple
+adam_weight_decay: 0.1
+adam_eps: 1e-8
+muon_lr: 0.02
+muon_momentum: 0.95
+
+# VAE configuration
+kld_weight: 1e-2
+kld_annealing_steps: 2000
+
+# Logging configuration
+seed: 42
+log_step_interval: 1
+output_dir: "outputs"
+wandb_name: "lvae-distributed"
+save_checkpoint: true
+
+# Cluster shenanigans
+per_process_vram_ratio: 0.8  # eg. 0.8, For APUs like MI300A and GH200
+
+# Resume configuration (optional)
+# resume_from: "outputs/model_best.pt"
+
+# Hydra configuration
+hydra:
+  run:
+    dir: ${output_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false 
