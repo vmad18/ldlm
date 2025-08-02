@@ -468,6 +468,13 @@ def main(cfg: DictConfig):
     
     print0(f"Using tokenizer: {tokenizer.name_or_path if hasattr(tokenizer, 'name_or_path') else 'unknown'}", logfile, console=True)
 
+    # Compile model BEFORE loading checkpoint to ensure optimizer parameter references are correct
+    if cfg.compile_model:
+        print0("Compiling model (before checkpoint loading to preserve optimizer parameter references).", logfile, console=True)
+        model = torch.compile(model, dynamic=False)
+    else:
+        print0("Skipping model compilation.", logfile, console=True)
+
     # Load checkpoint if resuming (AFTER compilation so optimizer refs are correct)
     step = 0
     best_val_loss = float('inf')

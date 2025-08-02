@@ -27,19 +27,20 @@ QOS = "pbatch"
 # BANK = "guests"
 BANK = "effml"
 
-# TIME_LIMIT = 30  # in minutes
-# TIME_LIMIT = 15
-TIME_LIMIT = 1440 
+TIME_LIMIT = 15
+# TIME_LIMIT = 1440 
 
-# REPETITIONS = 1
-REPETITIONS = 3
-DEPENDENCY = "afterany"
-# DEPENDENCY = "singleton"
+REPETITIONS = 1
+# REPETITIONS = 3
+# DEPENDENCY = "afterany"
+DEPENDENCY = "singleton"
 # DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-BASE_RUN_NAME = f"prod"
+# BASE_RUN_NAME = f"prod"
+# BASE_RUN_NAME = f"compile_series"
+BASE_RUN_NAME = f"compile_series_w_compile_model"
 
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
@@ -47,13 +48,28 @@ INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 # TGT_TOKENS = 100e9
 TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
 
+# flag to taggle special setup for chaining a compile warmup series
+# COMPILE_SERIES = False
+COMPILE_SERIES = True
+
+if COMPILE_SERIES:
+    assert DEPENDENCY == "singleton", "Compile series warmup workflow requires singleton dependency"
+
 # Cfgs
 # gpn = gpus per node
 # arg list is:
 # script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr ...
 exp_list = [
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],
     ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4]
+    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
@@ -98,9 +114,15 @@ for exp in final_exp_list:
 
     # compute max steps automatically for token target
     max_steps = int(TGT_TOKENS / (wbsz*seq_len))+1
-    cli_args += f" train_num_steps={max_steps}"
+    # compile series
+    if COMPILE_SERIES:
+        # shortcircuit the training
+        cli_args += f" train_num_steps=10"
+    else:
+        # prod
+        cli_args += f" train_num_steps={max_steps}"
 
-    # compile 
+    # compile model
     # compile_str = "compiled" if compile_model else "uncompiled"
     # cli_args += f" compile_model={compile_model}"
 
@@ -110,7 +132,13 @@ for exp in final_exp_list:
 
     # join to a unique run name for the experiment
     # run_name = f"{cfg_name}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}_{compile_str}"
-    run_name = f"{cfg_name}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
+    # for compilation series
+    if COMPILE_SERIES:
+        # name such that they are an implicit slurm chain by sharing same name
+        run_name = f"{cfg_name}"
+    else:
+        # prod
+        run_name = f"{cfg_name}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
 
     # last thing, add our manual result dir
     res_folder = f"{BASE_OUT_DIR}/{BASE_RUN_NAME}/{run_name}"
@@ -118,6 +146,14 @@ for exp in final_exp_list:
 
     # put together the actual "train.py" command
     custom_invocation = f"{INVOCATION_PREAMBLE} {script} {cli_args}"
+    
+    # for compilation series
+    if COMPILE_SERIES:
+        # clear the prev ckpts
+        custom_invocation = f"rm -rf {res_folder}/*.pt && {custom_invocation}"
+    else:
+        # prod
+        pass
 
     # make the complete launcher command
     command = f"""\
