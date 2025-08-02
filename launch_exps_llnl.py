@@ -27,20 +27,22 @@ QOS = "pbatch"
 # BANK = "guests"
 BANK = "effml"
 
-TIME_LIMIT = 15
-# TIME_LIMIT = 1440 
+# TIME_LIMIT = 15
+# TIME_LIMIT = 30
+TIME_LIMIT = 1440 
 
-REPETITIONS = 1
-# REPETITIONS = 3
-# DEPENDENCY = "afterany"
-DEPENDENCY = "singleton"
+# REPETITIONS = 1
 # DEPENDENCY = None
+REPETITIONS = 3
+DEPENDENCY = "afterany"
+# DEPENDENCY = "singleton"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-# BASE_RUN_NAME = f"prod"
+BASE_RUN_NAME = f"prod"
 # BASE_RUN_NAME = f"compile_series"
-BASE_RUN_NAME = f"compile_series_w_compile_model"
+# BASE_RUN_NAME = f"compile_series_w_compile_model"
+# BASE_RUN_NAME = f"compile_series_w_10m_timeout"
 
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
@@ -49,8 +51,8 @@ INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
 
 # flag to taggle special setup for chaining a compile warmup series
-# COMPILE_SERIES = False
-COMPILE_SERIES = True
+COMPILE_SERIES = False
+# COMPILE_SERIES = True
 
 if COMPILE_SERIES:
     assert DEPENDENCY == "singleton", "Compile series warmup workflow requires singleton dependency"
@@ -60,14 +62,14 @@ if COMPILE_SERIES:
 # arg list is:
 # script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr ...
 exp_list = [
-    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],
     ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
     ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
 ]

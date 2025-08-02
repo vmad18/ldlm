@@ -331,7 +331,8 @@ def main(cfg: DictConfig):
         rank=rank,
         world_size=world_size,
         device_id=device,  # passing this immediately forms the NCCL communicator.
-        timeout=timedelta(minutes=5),
+        # timeout=timedelta(minutes=5),
+        timeout=timedelta(minutes=30), # relax the timeout
     )
     # _Must_ this come after?
     # idk, @jog did it this way back in summer of 24' so that's good enough for me.
