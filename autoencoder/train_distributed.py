@@ -503,7 +503,11 @@ def main(cfg: DictConfig):
         if training_mode == 'lvae':
             # For LVAE training, look for 'lvae_model' first, then 'model'
             if 'lvae_model' in data:
-                model.load_state_dict(data['lvae_model'])
+                # load into the unwrapped model if wrapped
+                if hasattr(model, '_orig_mod'):
+                    model._orig_mod.load_state_dict(data['lvae_model'])
+                else:
+                    model.load_state_dict(data['lvae_model'])
                 print0("Loaded LVAE model state dict on all ranks", logfile, console=True)
             else:
                 raise KeyError("No model state dict found in checkpoint")
