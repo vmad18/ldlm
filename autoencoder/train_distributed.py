@@ -37,8 +37,6 @@ from diffusion.neural_diffusion import DiTModel, DiTConfig
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-print("Importing complete in train_lvae_distributed.py", flush=True)
-
 @torch.compile
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     """
@@ -308,8 +306,6 @@ def main(cfg: DictConfig):
     For CFM training, cfg.model.lvae_model_path must point to a trained LVAE checkpoint.
     """
 
-    print(f"Top of main in train_distributed.py", flush=True)
-
     # Initialize distributed training
     # The convention is to:
     # 1. check the RANK, WORLD_SIZE, and LOCAL_RANK environment variables. launch_tuo.py and torchrun set these.
@@ -514,7 +510,11 @@ def main(cfg: DictConfig):
         elif training_mode == 'cfm':
             # For CFM training, load the CFM model state
             if 'ldlm_model' in data:
-                model.load_state_dict(data['ldlm_model'])
+                # load into the unwrapped model if wrapped
+                if hasattr(model, '_orig_mod'):
+                    model._orig_mod.load_state_dict(data['ldlm_model'])
+                else:
+                    model.load_state_dict(data['ldlm_model'])
                 print0("Loaded CFM model state dict on all ranks", logfile, console=True)
             else:
                 raise KeyError("No CFM model state dict found in checkpoint")

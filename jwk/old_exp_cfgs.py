@@ -89,3 +89,16 @@
 # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4, False],
 # # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4, True],
 # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4, False],
+
+# BASE_RUN_NAME = f"compile_series"
+# BASE_RUN_NAME = f"compile_series_w_compile_model"
+# BASE_RUN_NAME = f"compile_series_w_10m_timeout"
+
+# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],

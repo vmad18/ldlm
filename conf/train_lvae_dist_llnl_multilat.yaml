@@ -1,6 +1,8 @@
 # @package _global_
 # Distributed LVAE training configuration for Hydra
 
+# Training mode
+training_mode: lvae
 
 # Model configuration
 model:
@@ -18,7 +20,7 @@ train_num_steps: 100000
 train_bs: 256
 eval_bs: 256
 eval_every: 500
-grad_accumulate: 8
+grad_accumulate: 1
 compile_model: true
 resume_from: null
 results_folder: null

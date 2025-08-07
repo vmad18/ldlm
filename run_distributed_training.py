@@ -25,8 +25,6 @@ print(f"Importing complete in run_distributed_training.py", flush=True)
 @hydra.main(version_base=None, config_path="conf", config_name="train_lvae_dist")
 def main_script(cfg: DictConfig) -> None:
     """Main script entry point with Hydra configuration"""
-
-    print(f"Top of main in run_distributed_training.py", flush=True)
     
     # Check if we're in a distributed environment
     if "RANK" not in os.environ:
