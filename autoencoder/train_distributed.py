@@ -562,8 +562,12 @@ def main(cfg: DictConfig):
         
         optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
         
-        optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
-        optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
+        if cfg.training_mode == 'lvae':
+            optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
+            optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
+        elif cfg.training_mode == 'cfm':
+            optimizer_adam.load_state_dict(optimizer_data['ldlm_optimizer_adam'])
+            optimizer_muon.load_state_dict(optimizer_data['ldlm_optimizer_muon'])
 
         print(f"Loaded best per-rank optimizer states for rank {rank}")
 

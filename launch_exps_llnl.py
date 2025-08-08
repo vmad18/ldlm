@@ -21,27 +21,27 @@ EXTRA_COMPILE_FLAGS = True
 # LOG_RECOMPILES=False
 LOG_RECOMPILES=True
 
-# QOS = "pdebug"
-QOS = "pbatch"
+QOS = "pdebug"
+# QOS = "pbatch"
 
-# BANK = "guests"
-BANK = "effml"
+BANK = "guests"
+# BANK = "effml"
 
 # TIME_LIMIT = 15
-# TIME_LIMIT = 30
-TIME_LIMIT = 1440 
+TIME_LIMIT = 30
+# TIME_LIMIT = 1440 
 
-# REPETITIONS = 1
-# DEPENDENCY = None
-REPETITIONS = 3
-DEPENDENCY = "afterany"
+REPETITIONS = 1
+DEPENDENCY = None
+# REPETITIONS = 3
+# DEPENDENCY = "afterany"
 # DEPENDENCY = "singleton"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-# BASE_RUN_NAME = f"debug"
+BASE_RUN_NAME = f"debug"
 # BASE_RUN_NAME = f"compile_series"
-BASE_RUN_NAME = f"prod"
+# BASE_RUN_NAME = f"prod"
 
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
@@ -64,16 +64,18 @@ exp_list = [
     # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
     # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
     # cfm training
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
-    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4, f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # fix the single latent
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 1, 1, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    # ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+    ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
 ]
 
 final_exp_list = exp_list
@@ -94,8 +96,8 @@ for exp in final_exp_list:
         accum,
         seq_len,
         lr,
+        compile_model,
         lvae_path,
-        # compile_model,
     ) = exp
 
     gpus = nodes * gpn
@@ -130,8 +132,8 @@ for exp in final_exp_list:
         cli_args += f" train_num_steps={max_steps}"
 
     # compile model
-    # compile_str = "compiled" if compile_model else "uncompiled"
-    # cli_args += f" compile_model={compile_model}"
+    compile_str = "compiled" if compile_model else "uncompiled"
+    cli_args += f" compile_model={compile_model}"
 
     # add the lvae path
     cli_args += f" model.lvae_model_path={lvae_path}"

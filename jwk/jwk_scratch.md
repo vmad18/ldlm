@@ -231,3 +231,29 @@ and loss is definitely going down
 
 getting something like 195 hr time to 100B on 1N4n
 
+
+
+# Debugging the single latent model's cfm run
+
+single latent
+
+0: > /p/vast1/kirchenb/diffusion-root/ldlm/diffusion/neural_diffusion.py(46)_to_real()
+0: -> return torch.view_as_real(x).flatten(start_dim=-2)0: 
+0: (Pdb) x.shape
+0: torch.Size([256, 8, 1, 128])
+0: (Pdb) 
+
+multi latent
+
+0: > /p/vast1/kirchenb/diffusion-root/ldlm/diffusion/neural_diffusion.py(46)_to_real()
+0: -> return torch.view_as_real(x).flatten(start_dim=-2)0: 
+
+0: (Pdb) x.shape
+0: torch.Size([256, 8, 8, 128])
+
+0: (Pdb) torch.view_as_real(x).shape
+0: torch.Size([256, 8, 8, 128, 2])
+
+0: (Pdb) torch.view_as_real(x).flatten(start_dim=-2).shape
+0: torch.Size([256, 8, 8, 256])
+

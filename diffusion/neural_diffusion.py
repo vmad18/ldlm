@@ -6,7 +6,7 @@ from einops import rearrange, repeat
 from math import sqrt, log
 
 from typing import Tuple, Optional
-
+import time
 
 class DiTConfig:
     num_latents = 32 
@@ -43,8 +43,26 @@ class RoPE(nn.Module):
 
     def _to_real(self, x: torch.Tensor) -> torch.Tensor:
         return torch.view_as_real(x).flatten(start_dim=-2)
+    
+    # def _to_real(self, x: torch.Tensor) -> torch.Tensor:
+    #     # print(f"Original strides: {x.stride()}")
+    #     x_contiguous = x.contiguous()
+    #     # x_contiguous.stride() # no-op, but perhaps does something?
+    #     # print(f"Contiguous strides: {x_contiguous.stride()}") # m'excuse wtf?
+    #     # print(f"bruv")
+    #     time.sleep(0.1)
+    #     x_real = torch.view_as_real(x)
+    #     x_flat = x_real.flatten(start_dim=-2)
+    #     return x_flat
+    
+    # def _to_real(self, x: torch.Tensor) -> torch.Tensor:
+    #     return torch.view_as_real(x.squeeze()).flatten(start_dim=-2)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # q_contig = q.contiguous()
+        # k_contig = k.contiguous()
+        # time.sleep(0.1)
+        # torch.cuda.synchronize()
 
         seq_len_q = q.shape[-2]
         seq_len_k = k.shape[-2]
@@ -57,6 +75,9 @@ class RoPE(nn.Module):
         
         q_rotated = self._to_complex(q) * rope_q
         k_rotated = self._to_complex(k) * rope_k
+        
+        # q_rotated = self._to_complex(q_contig) * rope_q
+        # k_rotated = self._to_complex(k_contig) * rope_k
         
         q_out = self._to_real(q_rotated).to(q.dtype)
         k_out = self._to_real(k_rotated).to(k.dtype)
@@ -106,7 +127,20 @@ class SelfAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, *_ = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        # print(f"qkv.shape: {qkv.shape}")
         q, k, v = qkv.unbind(0)
+        # q = qkv[0]
+        # k = qkv[1]
+        # v = qkv[2]
+        # print(f"q.shape: {q.shape}")
+        # print(f"k.shape: {k.shape}")
+        # print(f"v.shape: {v.shape}")
+        # breakpoint()
+        
+        # q_contig = q.contiguous()
+        # k_contig = k.contiguous()
+        # time.sleep(0.1)
+        # q, k = self.rope(q_contig, k_contig)
         
         q, k = self.rope(q, k)
         
