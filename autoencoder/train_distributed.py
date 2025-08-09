@@ -19,6 +19,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from torch.distributed.fsdp import fully_shard
 from torch.optim import AdamW
 
 from omegaconf import DictConfig, OmegaConf
@@ -399,6 +400,26 @@ def main(cfg: DictConfig):
         # LVAE training mode
         model, tokenizer = get_latent_vae_tokenizer(cfg.model)
         model = model.cuda()
+
+            # If using FSDP sharding, wrap model here
+        # following the new torch 2.8 FSDP2 interface
+        # https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-to-use-fsdp2
+        # since tutorials
+        if cfg.fsdp is not None:
+            print0(f"Wrapping model with fsdp config: {cfg.fsdp}", logfile, console=True)
+            breakpoint()
+            # for layer in model.layers:
+            #     fully_shard(layer) # normally transformer blocks
+            # fully_shard(model) # the embed and lm_head
+            for block in model.vae.encoder.blocks:
+                fully_shard(block) # perceiver blocks
+            fully_shard(model.vae.encoder) # other perceiver params
+            for block in model.vae.decoder.blocks:
+                fully_shard(block)
+            fully_shard(model.vae.decoder)
+            fully_shard(model.vae) #  top level embed and de-embed
+            print0(model, logfile, console=True)
+
         # Initialize CFM-related variables as None
         flow_matcher = None
         lvae_model = None
@@ -493,7 +514,32 @@ def main(cfg: DictConfig):
             raise FileNotFoundError(f"No checkpoint file found in {checkpoint_path}")
         
         # Load main checkpoint data
-        data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
+        if cfg.fsdp is not None:
+            from torch.distributed.tensor import distribute_tensor
+
+            # mmap=True reduces CPU memory usage
+            full_sd = torch.load(
+                str(checkpoint_file),
+                mmap=True,
+                weights_only=True,
+                map_location='cpu',
+            )
+            meta_sharded_sd = model.state_dict()
+            sharded_sd = {}
+            for param_name, full_tensor in full_sd.items():
+                sharded_meta_param = meta_sharded_sd.get(param_name)
+                sharded_tensor = distribute_tensor(
+                    full_tensor,
+                    sharded_meta_param.device_mesh,
+                    sharded_meta_param.placements,
+                )
+                sharded_sd[param_name] = nn.Parameter(sharded_tensor)
+            # `assign=True` since we cannot call `copy_` on meta tensor
+            # model.load_state_dict(sharded_sd, assign=True)
+            data = sharded_sd
+
+        else:
+            data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
         
         # Load model state dict first (each rank loads the same state, so no broadcast needed)
         if training_mode == 'lvae':
@@ -501,9 +547,9 @@ def main(cfg: DictConfig):
             if 'lvae_model' in data:
                 # load into the unwrapped model if wrapped
                 if hasattr(model, '_orig_mod'):
-                    model._orig_mod.load_state_dict(data['lvae_model'])
+                    model._orig_mod.load_state_dict(data['lvae_model'], assign=cfg.fsdp is not None)
                 else:
-                    model.load_state_dict(data['lvae_model'])
+                    model.load_state_dict(data['lvae_model'], assign=cfg.fsdp is not None)
                 print0("Loaded LVAE model state dict on all ranks", logfile, console=True)
             else:
                 raise KeyError("No model state dict found in checkpoint")
@@ -518,10 +564,10 @@ def main(cfg: DictConfig):
                 print0("Loaded CFM model state dict on all ranks", logfile, console=True)
             else:
                 raise KeyError("No CFM model state dict found in checkpoint")
-
-    for param in model.parameters():
-        dist.broadcast(param.detach(), 0)
-    
+    if cfg.fsdp is None:
+        for param in model.parameters():
+            dist.broadcast(param.detach(), 0)
+        
     embed_params, head_params, pos_embed_params, hidden_matrix_params, scalar_params = [], [], [], [], []
     # Carefully separate parameters to avoid size mismatches
     for n, p in model.named_parameters():
@@ -734,6 +780,17 @@ def main(cfg: DictConfig):
                         checkpoint['lvae_model_path'] = cfg.model.lvae_model_path
                         print0("Saving CFM model checkpoint", logfile, console=True)
                     
+                    if cfg.fsdp is not None:
+                        sharded_sd = model.state_dict()
+                        cpu_state_dict = {}
+                        for param_name, sharded_param in sharded_sd.items():
+                            full_param = sharded_param.full_tensor()
+                            if torch.distributed.get_rank() == 0:
+                                cpu_state_dict[param_name] = full_param.cpu()
+                            else:
+                                del full_param
+                        checkpoint = cpu_state_dict
+
                     torch.save(checkpoint, results_folder / "model.pt")
                     
                     if is_new_best:
