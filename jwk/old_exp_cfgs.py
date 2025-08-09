@@ -102,3 +102,33 @@
 # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4],
 # ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4],
 # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4],
+
+# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
+# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
+# cfm training
+# ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 1, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 2, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 4, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 8, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4, "True", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_multilat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# fix the single latent
+# ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 1, 1, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 2, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 4, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 8, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+# ["run_distributed_training.py", "train_cfm_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4, "False", f"{BASE_OUT_DIR}/prod/train_lvae_dist_llnl_singlelat_16N64n_mb256-acc1-wb16384-seq128_lr1e-04"],
+
+
+# searching for mr. wideboi
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 256, 1, 128, 1, 2048, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 256, 1, 128, 1, 4096, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 256, 1, 128, 1, 8192, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 128, 1, 128, 1, 4096, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 128, 1, 128, 1, 8192, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 128, 1, 128, 1, 16384, 1e-2, 1e-4, "False", None],
+# oof need to really shrink it to make progress
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 2, 1, 64, 8, 2048, 1e-4, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 1, 2, 1, 64, 1, 2048, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 2, 1, 64, 1, 2048, 1e-2, 1e-4, "False", None],
+# ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 2, 1, 64, 1, 4096, 1e-2, 1e-4, "False", None],

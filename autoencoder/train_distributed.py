@@ -384,7 +384,8 @@ def main(cfg: DictConfig):
             project="lvae-distributed",
             name=f"{cfg.wandb_name}-{cfg_hash[:8]}" if cfg.wandb_name else f"run-{cfg_hash[:8]}",
             dir=str(results_folder),
-            config=OmegaConf.to_container(cfg, resolve=True)
+            config=OmegaConf.to_container(cfg, resolve=True),
+            mode=cfg.wandb_mode if cfg.wandb_mode else 'online',
         )
         
         print0(f"Results folder: {results_folder}", logfile, console=True)
@@ -403,6 +404,11 @@ def main(cfg: DictConfig):
         flow_matcher = None
         lvae_model = None
         cfm_model = None
+        
+        num_vae_params = sum(p.numel() for p in model.parameters()) / 1e6
+        print0(f"Created VAE model with {num_vae_params:.2f}M parameters", logfile, console=True)
+        if master_process:
+            wandb.config.update({"num_vae_params": f"{num_vae_params:.2f}"})
         
     elif training_mode == 'cfm':
         # CFM training mode - need to load pre-trained LVAE
@@ -458,7 +464,10 @@ def main(cfg: DictConfig):
         # Set model to the CFM model for training
         model = cfm_model
         
-        print0(f"Created CFM model with {sum(p.numel() for p in cfm_model.parameters()) / 1e6:.2f}M parameters", logfile, console=True)
+        num_cfm_params = sum(p.numel() for p in cfm_model.parameters()) / 1e6
+        print0(f"Created CFM model with {num_cfm_params:.2f}M parameters", logfile, console=True)
+        if master_process:
+            wandb.config.update({"num_cfm_params": f"{num_cfm_params:.2f}"})
     
     else:
         raise ValueError(f"Unknown training mode: {training_mode}")
@@ -1009,6 +1018,7 @@ def main(cfg: DictConfig):
         first_step = False
     # Final logging
     if master_process:
+        wandb.finish()
         print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
                f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", logfile, console=True)
         print0('Training complete', logfile, console=True)
