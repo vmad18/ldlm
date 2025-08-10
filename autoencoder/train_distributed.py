@@ -222,6 +222,13 @@ def compute_grad_norm(parameters):
     total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), p=2) for p in parameters]), p=2).item()
     return total_norm
 
+def num_parameters(module: nn.Module, requires_grad: Optional[bool] = None) -> int:
+    total = 0
+    for p in module.parameters():
+        if requires_grad is None or p.requires_grad == requires_grad:
+            total += p.numel()
+    return total
+
 # CFM helper functions
 def euler_solver(x_0: torch.Tensor, t_steps: torch.Tensor, model: DiTModel, device):
     """Euler solver for CFM generation"""
@@ -405,10 +412,14 @@ def main(cfg: DictConfig):
         lvae_model = None
         cfm_model = None
         
-        num_vae_params = sum(p.numel() for p in model.parameters()) / 1e6
-        print0(f"Created VAE model with {num_vae_params:.2f}M parameters", logfile, console=True)
+        num_vae_params = num_parameters(model, requires_grad=None)
+        num_vae_params_reqgrad = num_parameters(model, requires_grad=True)
+        num_vae_params_noreqgrad = num_parameters(model, requires_grad=False)
+        print0(f"Created VAE model with {num_vae_params/1e6:.1f}M parameters", logfile, console=True)
+        print0(f"Created VAE model with {num_vae_params_reqgrad/1e6:.1f}M params that req grad", logfile, console=True)
+        print0(f"Created VAE model with {num_vae_params_noreqgrad/1e6:.1f}M params that don't req grad", logfile, console=True)
         if master_process:
-            wandb.config.update({"num_vae_params": f"{num_vae_params:.2f}"})
+            wandb.config.update({"num_vae_params": int(num_vae_params)})
         
     elif training_mode == 'cfm':
         # CFM training mode - need to load pre-trained LVAE
@@ -463,11 +474,15 @@ def main(cfg: DictConfig):
         
         # Set model to the CFM model for training
         model = cfm_model
-        
-        num_cfm_params = sum(p.numel() for p in cfm_model.parameters()) / 1e6
-        print0(f"Created CFM model with {num_cfm_params:.2f}M parameters", logfile, console=True)
+
+        num_cfm_params = num_parameters(model, requires_grad=None)
+        num_cfm_params_reqgrad = num_parameters(model, requires_grad=True)
+        num_cfm_params_noreqgrad = num_parameters(model, requires_grad=False)
+        print0(f"Created CFM model with {num_cfm_params/1e6:.1f}M parameters", logfile, console=True)
+        print0(f"Created CFM model with {num_cfm_params_reqgrad/1e6:.1f}M params that req grad", logfile, console=True)
+        print0(f"Created CFM model with {num_cfm_params_noreqgrad/1e6:.1f}M params that don't req grad", logfile, console=True)
         if master_process:
-            wandb.config.update({"num_cfm_params": f"{num_cfm_params:.2f}"})
+            wandb.config.update({"num_cfm_params": int(num_cfm_params)})
     
     else:
         raise ValueError(f"Unknown training mode: {training_mode}")
