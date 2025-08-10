@@ -23,14 +23,14 @@ EXTRA_COMPILE_FLAGS = True
 # LOG_RECOMPILES=False
 LOG_RECOMPILES = True
 
-QOS = "pdebug"
-# QOS = "pbatch"
+# QOS = "pdebug"
+QOS = "pbatch"
 
-BANK = "guests"
-# BANK = "effml"
+# BANK = "guests"
+BANK = "effml"
 
-TIME_LIMIT = 20
-# TIME_LIMIT = 30
+# TIME_LIMIT = 20
+TIME_LIMIT = 59
 # TIME_LIMIT = 1440
 
 REPETITIONS = 1
@@ -43,7 +43,8 @@ BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
 # BASE_RUN_NAME = f"debug"
 # BASE_RUN_NAME = f"compile_series"
-BASE_RUN_NAME = f"scale_series"
+# BASE_RUN_NAME = f"scale_series"
+BASE_RUN_NAME = f"scale_series_mbsz"
 # BASE_RUN_NAME = f"prod"
 
 WANDB_OFFLINE = False
@@ -52,12 +53,15 @@ WANDB_OFFLINE = False
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 
+# INDUCTOR_CACHE=None
+INDUCTOR_CACHE="/l/ssd/$USER"
+
 # MAX_STEPS = None
 # # TGT_TOKENS = 100e9
 # TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
 
 TGT_TOKENS = None
-MAX_STEPS = 200
+MAX_STEPS = 100
 
 # flag to taggle special setup for chaining a compile warmup series
 COMPILE_SERIES = False
@@ -79,44 +83,45 @@ if COMPILE_SERIES:
 # ]
 
 ashwinee_cfgs = {
-    "extreme_examples_1b": {
-        "widest_model": {
-            "d_model": 5120,
-            "latent_dim": 384,
-            "layers_p": 2,
-            "params_millions": 992.02,
-        },
-        "narrowest_model": {
-            "d_model": 256,
-            "latent_dim": 2176,
-            "layers_p": 20,
-            "params_millions": 993.67,
-        },
-        "largest_latent": {
-            "d_model": 256,
-            "latent_dim": 7552,
-            "layers_p": 2,
-            "params_millions": 1003.84,
-        },
-        "smallest_latent": {
-            "d_model": 2048,
-            "latent_dim": 256,
-            "layers_p": 18,
-            "params_millions": 993.42,
-        },
-        "deepest_model": {
-            "d_model": 384,
-            "latent_dim": 1920,
-            "layers_p": 24,
-            "params_millions": 1002.09,
-        },
-        # "shallowest_model": {
-        #     "d_model": 256,
-        #     "latent_dim": 7552,
-        #     "layers_p": 2,
-        #     "params_millions": 1003.84,
-        # },
-    },
+    # "extreme_examples_1b": {
+    #     "widest_model": {
+    #         "d_model": 5120,
+    #         "latent_dim": 384,
+    #         "layers_p": 2,
+    #         "params_millions": 992.02,
+    #     },
+    #     "narrowest_model": {
+    #         "d_model": 256,
+    #         "latent_dim": 2176,
+    #         "layers_p": 20,
+    #         "params_millions": 993.67,
+    #     },
+    #     "largest_latent": {
+    #         "d_model": 256,
+    #         "latent_dim": 7552,
+    #         "layers_p": 2,
+    #         "params_millions": 1003.84,
+    #     },
+    #     "smallest_latent": {
+    #         "d_model": 2048,
+    #         "latent_dim": 256,
+    #         "layers_p": 18,
+    #         "params_millions": 993.42,
+    #     },
+    #     "deepest_model": {
+    #         "d_model": 384,
+    #         "latent_dim": 1920,
+    #         "layers_p": 24,
+    #         "params_millions": 1002.09,
+    #     },
+    #     # equiv to another
+    #     # "shallowest_model": {
+    #     #     "d_model": 256,
+    #     #     "latent_dim": 7552,
+    #     #     "layers_p": 2,
+    #     #     "params_millions": 1003.84,
+    #     # },
+    # },
     "extreme_examples_2b": {
         "widest_model": {
             "d_model": 8192,
@@ -124,12 +129,14 @@ ashwinee_cfgs = {
             "layers_p": 2,
             "params_millions": 2487.57,
         },
-        # "narrowest_model": {
+        # equiv to another
+        # "narrowest_model": { 
         #     "d_model": 256,
         #     "latent_dim": 3328,
         #     "layers_p": 24,
         #     "params_millions": 2517.85,
         # },
+        # seem like could be too big to run even at the min bsz
         "largest_latent": {
             "d_model": 1280,
             "latent_dim": 8192,
@@ -158,7 +165,7 @@ ashwinee_cfgs = {
 }
 
 exp_list = [
-    ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 1, 1, 128, 1e-4, 1e-4, "False", 1],
+    ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 1, 128, 1e-4, 1e-4, "True", 1],
 ]
 
 # sweep the model shapes
@@ -179,7 +186,14 @@ exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in ex
 
 # then we will sweep the mbsz, and for the costliest model, use this to set the max wbsz that 8N or 16N allows
 # then use only the node ct required for each less costly one
+# 1Bs
+# hparam_list = [1,2,4,8,16,32,64,128][::-1]
+# hparam_list = [256,512][::-1]
+# 2Bs
+# hparam_list = [1,2,4,8,16][::-1]
+hparam_list = [32,64,128,256,512][::-1]
 
+exp_list = list(chain(*[[exp + [hparam] for hparam in hparam_list] for exp in exp_list]))
 
 final_exp_list = exp_list
 for exp in final_exp_list:
@@ -195,7 +209,6 @@ for exp in final_exp_list:
         cfg_name,
         nodes,
         gpn,
-        mbsz,
         accum,
         seq_len,
         kld,
@@ -206,6 +219,7 @@ for exp in final_exp_list:
         d_model,
         lat_dim,
         layers,
+        mbsz,
     ) = exp
 
     gpus = nodes * gpn
@@ -305,6 +319,7 @@ for exp in final_exp_list:
         --rocm_version={ROCM_VERSION} \
         --rccl_installdir={RCCL_INSTALL_DIR} \
         --rccl_cfg={RCCL_CFG} \
+        --cache_dir={INDUCTOR_CACHE} \
         --qos={QOS} \
         --bank={BANK} \
         --repetitions={REPETITIONS}{f' --dependency={DEPENDENCY}' if DEPENDENCY is not None else ''} \
