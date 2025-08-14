@@ -29,28 +29,19 @@ QOS = "pbatch"
 # BANK = "guests"
 BANK = "effml"
 
-# TIME_LIMIT = 20
-TIME_LIMIT = 59
-# TIME_LIMIT = 1440
+TIME_LIMIT = 29
 
 REPETITIONS = 1
 DEPENDENCY = None
-# REPETITIONS = 3
-# DEPENDENCY = "afterany"
-# DEPENDENCY = "singleton"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
 # BASE_RUN_NAME = f"debug"
-# BASE_RUN_NAME = f"compile_series"
-# BASE_RUN_NAME = f"scale_series"
-BASE_RUN_NAME = f"scale_series_mbsz"
-# BASE_RUN_NAME = f"prod"
+BASE_RUN_NAME = f"scale_series_nodes_vs_mbsz"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
 
-# INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 
 # INDUCTOR_CACHE=None
@@ -63,6 +54,16 @@ INDUCTOR_CACHE="/l/ssd/$USER"
 TGT_TOKENS = None
 MAX_STEPS = 100
 
+TOK_WBSZ_1M = 8192 * 128
+TOK_WBSZ_4M = TOK_WBSZ_1M * 4
+
+SEQ_LEN = 128
+
+GPN = 4
+
+MAX_MEM = None
+# MAX_MEM = 0.9
+
 # flag to taggle special setup for chaining a compile warmup series
 COMPILE_SERIES = False
 # COMPILE_SERIES = True
@@ -73,99 +74,73 @@ if COMPILE_SERIES:
     ), "Compile series warmup workflow requires singleton dependency"
 
 # Cfgs
-# gpn = gpus per node
-# arg list is:
-# script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr ...
-# exp_list = [
-# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4, "True", None],
-# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4, "True", None],
-# switching to single latents with smaller internal dims
-# ]
-
 ashwinee_cfgs = {
-    # "extreme_examples_1b": {
-    #     "widest_model": {
-    #         "d_model": 5120,
-    #         "latent_dim": 384,
-    #         "layers_p": 2,
-    #         "params_millions": 992.02,
-    #     },
-    #     "narrowest_model": {
-    #         "d_model": 256,
-    #         "latent_dim": 2176,
-    #         "layers_p": 20,
-    #         "params_millions": 993.67,
-    #     },
-    #     "largest_latent": {
-    #         "d_model": 256,
-    #         "latent_dim": 7552,
-    #         "layers_p": 2,
-    #         "params_millions": 1003.84,
-    #     },
-    #     "smallest_latent": {
-    #         "d_model": 2048,
-    #         "latent_dim": 256,
-    #         "layers_p": 18,
-    #         "params_millions": 993.42,
-    #     },
-    #     "deepest_model": {
-    #         "d_model": 384,
-    #         "latent_dim": 1920,
-    #         "layers_p": 24,
-    #         "params_millions": 1002.09,
-    #     },
-    #     # equiv to another
-    #     # "shallowest_model": {
-    #     #     "d_model": 256,
-    #     #     "latent_dim": 7552,
-    #     #     "layers_p": 2,
-    #     #     "params_millions": 1003.84,
-    #     # },
-    # },
+    "orig_single_lat": {
+        "reference": {
+            "d_model": 768,
+            "latent_dim": 2048,
+            "layers_p": 12,
+        },
+    },
+    "extreme_examples_1b": {
+        "widest_model": {
+            "d_model": 5120,
+            "latent_dim": 384,
+            "layers_p": 2,
+        },
+        "narrowest_model": {
+            "d_model": 256,
+            "latent_dim": 2176,
+            "layers_p": 20,
+        },
+        "largest_latent": {
+            "d_model": 256,
+            "latent_dim": 7552,
+            "layers_p": 2,
+        },
+        "smallest_latent": {
+            "d_model": 2048,
+            "latent_dim": 256,
+            "layers_p": 18,
+        },
+        "deepest_model": {
+            "d_model": 384,
+            "latent_dim": 1920,
+            "layers_p": 24,
+        },
+    },
     "extreme_examples_2b": {
         "widest_model": {
             "d_model": 8192,
             "latent_dim": 5376,
             "layers_p": 2,
-            "params_millions": 2487.57,
         },
-        # equiv to another
-        # "narrowest_model": { 
-        #     "d_model": 256,
-        #     "latent_dim": 3328,
-        #     "layers_p": 24,
-        #     "params_millions": 2517.85,
+        # # seem like could be too big to run even at the min bsz
+        # "largest_latent": {
+        #     "d_model": 1280,
+        #     "latent_dim": 8192,
+        #     "layers_p": 4,
         # },
-        # seem like could be too big to run even at the min bsz
-        "largest_latent": {
-            "d_model": 1280,
-            "latent_dim": 8192,
-            "layers_p": 4,
-            "params_millions": 2486.47,
-        },
         "smallest_latent": {
             "d_model": 3328,
             "latent_dim": 256,
             "layers_p": 21,
-            "params_millions": 2521.47,
         },
         "deepest_model": {
             "d_model": 256,
             "latent_dim": 3328,
             "layers_p": 24,
-            "params_millions": 2517.85,
         },
         "shallowest_model": {
             "d_model": 6400,
             "latent_dim": 8192,
             "layers_p": 2,
-            "params_millions": 2505.12,
         },
     },
 }
 
 exp_list = [
-    ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 1, 128, 1e-4, 1e-4, "True", 1],
+    ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 1e-4, "True", 1, 1],
 ]
 
 # sweep the model shapes
@@ -184,15 +159,10 @@ for cfg_name, models in ashwinee_cfgs.items():
 
 exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in exp_list]))
 
-# then we will sweep the mbsz, and for the costliest model, use this to set the max wbsz that 8N or 16N allows
-# then use only the node ct required for each less costly one
-# 1Bs
-# hparam_list = [1,2,4,8,16,32,64,128][::-1]
-# hparam_list = [256,512][::-1]
-# 2Bs
-# hparam_list = [1,2,4,8,16][::-1]
-hparam_list = [32,64,128,256,512][::-1]
+hparam_list = [1,2,4,8,16,32]
+exp_list = list(chain(*[[exp + [hparam] for hparam in hparam_list] for exp in exp_list]))
 
+hparam_list = [1,2,4,8,16,32,64,128,256,512]
 exp_list = list(chain(*[[exp + [hparam] for hparam in hparam_list] for exp in exp_list]))
 
 final_exp_list = exp_list
@@ -207,22 +177,21 @@ for exp in final_exp_list:
     (
         script,
         cfg_name,
-        nodes,
-        gpn,
-        accum,
-        seq_len,
         kld,
         lr,
         compile_model,
-        # lvae_path,
+        accum,
         num_lat,
         d_model,
         lat_dim,
         layers,
+        nodes,
         mbsz,
     ) = exp
 
-    gpus = nodes * gpn
+    gpn = GPN
+    gpus = nodes * GPN
+    seq_len = SEQ_LEN
 
     cli_args = ""
 
@@ -270,15 +239,13 @@ for exp in final_exp_list:
     compile_str = "compiled" if compile_model else "uncompiled"
     cli_args += f" compile_model={compile_model}"
 
-    # # add the lvae path
-    # if lvae_path is not None:
-    #     cli_args += f" model.lvae_model_path={lvae_path}"
+    if MAX_MEM is not None:
+        cli_args += f" per_process_vram_ratio={MAX_MEM}"
 
     # mod more things
     # ...
 
     # join to a unique run name for the experiment
-    # run_name = f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}_{compile_str}"
     # for compilation series
     if COMPILE_SERIES:
         # name such that they are an implicit slurm chain by sharing same name
@@ -286,8 +253,6 @@ for exp in final_exp_list:
     else:
         # prod
         run_name = (
-            # f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
-            # f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{model_str}_{lr_name_str}"
             f"{BASE_RUN_NAME}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
         )
     
@@ -338,6 +303,6 @@ for exp in final_exp_list:
         os.system(command)
     else:
         print(run_name)
-        print(command)
+        # print(command)
 
 print(f"Total launches: {total_launches}")

@@ -655,6 +655,7 @@ def main(cfg: DictConfig):
     
     torch.cuda.synchronize()
     t0 = time.perf_counter()
+    log_t0 = time.perf_counter()
     first_step = True
     for step in range(step, cfg.train_num_steps + 1):
         last_step = (step == cfg.train_num_steps)
@@ -892,6 +893,7 @@ def main(cfg: DictConfig):
             # Restart training timer
             torch.cuda.synchronize()
             t0 = time.perf_counter()
+            log_t0 = time.perf_counter()
         
         if last_step:
             break
@@ -965,11 +967,20 @@ def main(cfg: DictConfig):
             max_seq_len = cfg.model.max_seq_len if hasattr(cfg.model, 'max_seq_len') else (
                 loaded_lvae_cfg.model.max_seq_len if 'loaded_lvae_cfg' in locals() else 1024
             )
-            tokens_processed = step * cfg.train_bs * cfg.grad_accumulate * world_size * max_seq_len
+            tokens_per_step = cfg.train_bs * cfg.grad_accumulate * world_size * max_seq_len
+            tokens_processed = step * tokens_per_step
             total_tokens = getattr(cfg, 'total_tokens', 100_000_000_000)  # Default 100B tokens
             epoch = tokens_processed / total_tokens
             
+            time_since_last_log = (time.perf_counter() - log_t0)
+            step_time_secs = time_since_last_log / cfg.log_step_interval
+
             approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
+
+            step_avg_secs = approx_training_time_ms/1e3/(step + 1)
+
+            world_toks_per_sec = int(tokens_per_step / step_time_secs)
+            gpu_toks_per_sec = int(world_toks_per_sec / world_size)
 
             time_remaining = (cfg.train_num_steps - step) * (approx_training_time_ms / (step + 1))
             time_remaining_hrs = int(time_remaining) / 1e3 / 3600
@@ -988,8 +999,13 @@ def main(cfg: DictConfig):
                        f"kld_weight:{current_kld_weight:.6f} grad_norm:{grad_norm:.4f} "
                        f"lr:{current_lr:.6f} muon_momentum:{muon_momentum:.3f} "
                        f"train_time:{approx_training_time_ms/1e3:.0f}s "
-                       f"step_avg:{approx_training_time_ms/1e3/(step + 1):.2f}s "
-                       f"epoch:{epoch:.4f} tokens:{tokens_processed} "
+                       f"epoch:{epoch:.4f} "
+                       f"tokens:{tokens_processed} "
+                       f"tokens_per_step:{tokens_per_step} "
+                       f"step_avg:{step_avg_secs:.2f}s "
+                       f"step_time_secs:{step_time_secs:.2f}s "
+                       f"world_toks_per_sec:{world_toks_per_sec} "
+                       f"gpu_toks_per_sec:{gpu_toks_per_sec} "
                        f"time_remaining_hrs:{time_remaining_hrs:.2f}hr",
                        logfile, console=True)
                        
@@ -1000,8 +1016,14 @@ def main(cfg: DictConfig):
                        f"grad_norm:{grad_norm:.4f} lr:{current_lr:.6f} "
                        f"muon_momentum:{muon_momentum:.3f} "
                        f"train_time:{approx_training_time_ms/1e3:.0f}s "
-                       f"step_avg:{approx_training_time_ms/1e3/(step + 1):.2f}s "
-                       f"epoch:{epoch:.4f} tokens:{tokens_processed} "
+                       f"step_avg:{step_avg_secs:.2f}s "
+                       f"epoch:{epoch:.4f} "
+                       f"tokens:{tokens_processed} "
+                       f"tokens_per_step:{tokens_per_step} "
+                       f"step_avg:{step_avg_secs:.2f}s "
+                       f"step_time_secs:{step_time_secs:.2f}s "
+                       f"world_toks_per_sec:{world_toks_per_sec} "
+                       f"gpu_toks_per_sec:{gpu_toks_per_sec} "
                        f"time_remaining_hrs:{time_remaining_hrs:.2f}hr",
                        logfile, console=True)
             if master_process:
@@ -1012,7 +1034,12 @@ def main(cfg: DictConfig):
                     "train/lr": current_lr,
                     "step": step,
                     "epoch": epoch,
-                    "samples": tokens_processed,
+                    "tokens": tokens_processed,
+                    "tokens_per_step": tokens_per_step,
+                    "step_avg_secs": step_avg_secs,
+                    "step_time_secs": step_time_secs,
+                    "world_toks_per_sec": world_toks_per_sec,
+                    "gpu_toks_per_sec": gpu_toks_per_sec,
                     "time_remaining_hrs": time_remaining_hrs,
                 }
                 
@@ -1030,6 +1057,7 @@ def main(cfg: DictConfig):
                     })
                 
                 wandb.log(logs, step=step)
+            log_t0 = time.perf_counter()
         first_step = False
     # Final logging
     if master_process:
