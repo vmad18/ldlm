@@ -8,7 +8,7 @@ training_mode: lvae
 model:
   vocab_size: 50257
   d_model: 768
-  latent_dim: 1536
+  latent_dim: 2048
   num_latents: 1
   dim_head: 128
   max_seq_len: 128
@@ -25,13 +25,13 @@ compile_model: true
 resume_from: null
 results_folder: null
 
+# parallelization config
+fsdp: true
+
 # Data configuration
 train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
 val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
-# total_tokens: 100000000000  # 100B tokens
-total_tokens: 10000000000
-dataset_name: "fineweb-edu_10b"
-num_samples: null
+total_tokens: 100000000000  # 100B tokens
 
 # Optimization configuration
 learning_rate: 1e-4
@@ -42,7 +42,7 @@ muon_lr: 0.02
 muon_momentum: 0.95
 
 # VAE configuration
-kld_weight: 1e-2
+kld_weight: 1e-4
 kld_annealing_steps: 2000
 
 # Logging configuration
@@ -50,6 +50,7 @@ seed: 42
 log_step_interval: 1
 output_dir: "outputs"
 wandb_name: "lvae-distributed"
+wandb_mode: "online"
 save_checkpoint: true
 
 # Cluster shenanigans

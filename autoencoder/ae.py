@@ -301,7 +301,9 @@ class VariationalAutoEncoder(nn.Module):
         return mu, log_var
 
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
+    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
         """Reparameterizes the latent space. If only_mu is True, returns the mean."""
+        if mu_only:
         if mu_only:
             return mu
         std = torch.exp(0.5 * log_var)  
@@ -315,7 +317,7 @@ class VariationalAutoEncoder(nn.Module):
     def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
         recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
 
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=[1, 2]).mean()
+        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
 
         total_loss = recon_loss + kld_loss
         
@@ -333,7 +335,9 @@ class VariationalAutoEncoder(nn.Module):
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
     
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
+        z = self.reparameterize(mu, log_var, mu_only)
         z = self.reparameterize(mu, log_var, mu_only)
         recon_x = self.decode(z)
         return recon_x, mu, log_var

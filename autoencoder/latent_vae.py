@@ -98,15 +98,22 @@ class LatentVAEModel(nn.Module):
         self.freeze = ctx
 
     def get_latents(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, mu_only: bool = True) -> torch.Tensor: 
+    def get_latents(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, mu_only: bool = True) -> torch.Tensor: 
         x = self.embed(input_ids) 
         if attn_mask is None: 
             attn_mask = torch.ones_like(input_ids)
+        return self.vae.reparameterize(*self.vae.encode(x, attn_mask.bool()), mu_only = mu_only)
         return self.vae.reparameterize(*self.vae.encode(x, attn_mask.bool()), mu_only = mu_only)
 
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         decoded_embeds = self.vae.decode(latent)
         return F.softmax(self.dembed_head(decoded_embeds), dim = -1)
 
+    def autoencode(
+                    self, 
+                    input_ids: torch.Tensor, 
+                    attn_mask: Optional[torch.Tensor] = None, 
+                    mu_only: bool = False,) -> dict:
     def autoencode(
                     self, 
                     input_ids: torch.Tensor, 
@@ -153,8 +160,10 @@ def get_latent_vae_tokenizer(model_cfg) -> Tuple[LatentVAEModel, PreTrainedToken
     # TODO: do we need this? jwk: according to stacktrace later, yes? 
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    def next_multiple_of_n(v: float | int, *, n: int):
+        return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
     vae = LatentVAEModel(
-        vocab_size = len(tokenizer), 
+        vocab_size = next_multiple_of_n(len(tokenizer), n=128),
         d_model = model_cfg.d_model, 
         latent_dim = model_cfg.latent_dim, 
         num_latents = model_cfg.num_latents, 

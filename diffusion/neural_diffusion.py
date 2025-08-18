@@ -93,6 +93,7 @@ class TimestepEmbedder(nn.Module):
 
 
 # TODO fuse the two Attns to be Perceiver-Styled
+# TODO fuse the two Attns to be Perceiver-Styled
 class SelfAttention(nn.Module):
     def __init__(self, cfg: DiTConfig):
         super().__init__()
@@ -122,8 +123,10 @@ class CrossAttention(nn.Module):
         self.num_heads, self.head_dim = cfg.num_heads, cfg.dim // cfg.num_heads
         self.scale = self.head_dim ** -0.5
         
+        
         self.proj_q = nn.Linear(cfg.dim, cfg.dim, bias=False)
         self.proj_kv = nn.Linear(cfg.dim, 2 * cfg.dim, bias=False)
+        
         
         self.proj_o = nn.Linear(cfg.dim, cfg.dim)
 
@@ -141,15 +144,19 @@ class CrossAttention(nn.Module):
         
         sim = (q @ k.transpose(-2, -1)) * self.scale
         attn = sim.softmax(dim = -1) @ v
+        attn = sim.softmax(dim = -1) @ v
         x = rearrange(attn, 'b h n d -> b n (h d)')
         return self.proj_o(x)
 
 
 class FeedForward(nn.Module):
 
+
     def __init__(self, cfg: DiTConfig) -> None:
         super().__init__()
         hidden_dim = int(cfg.dim * cfg.expansion_factor)
+        self.proj_up = nn.Linear(cfg.dim, hidden_dim) 
+        self.proj_down = nn.Linear(hidden_dim, cfg.dim)
         self.proj_up = nn.Linear(cfg.dim, hidden_dim) 
         self.proj_down = nn.Linear(hidden_dim, cfg.dim)
 
@@ -173,18 +180,42 @@ class FinalLayer(nn.Module):
         x = modulate(self.norm_final(x), shift, scale)
         x = self.proj_out(x)
         return x
+        return self.proj_down(torch.nn.functional.gelu(self.proj_up(x))) # seems that gelu is >> better than relu^2
+
+
+class FinalLayer(nn.Module):
+    """ The final layer of DiT. """
+    def __init__(self, cfg: DiTConfig):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(cfg.dim, elementwise_affine=False, eps=1e-6)
+        self.proj_out = nn.Linear(cfg.dim, cfg.latent_dim, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cfg.dim, 2 * cfg.dim, bias=True)
+        )
+
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = modulate(self.norm_final(x), shift, scale)
+        x = self.proj_out(x)
+        return x
 
 
 def modulate(x, shift, scale):
     """ modulates the input tensor `x` using learned shift and scale. """
+    """ modulates the input tensor `x` using learned shift and scale. """
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
 
 
 class DiTBlock(nn.Module):
     """ DiT block with self-attention, cross-attention, and adaLN modulation """
+    """ DiT block with self-attention, cross-attention, and adaLN modulation """
     def __init__(self, cfg: DiTConfig):
         super().__init__()
 
+
+        # time embedding modulations 
 
         # time embedding modulations 
         self.adaLN_modulation = nn.Sequential(

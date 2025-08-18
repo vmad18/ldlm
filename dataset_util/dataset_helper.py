@@ -481,7 +481,7 @@ def _load_data_shard(file: Path):
         assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
     return tokens
 
-def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int, sequence_length: int, tokenizer=None, start_file_idx: int = 0):
+def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int, sequence_length: int, tokenizer=None, start_file_idx: int = 0, start_pos: int = 0):
     """
     Generator that yields batches from .bin files in the format expected by LatentVAE.
     
@@ -493,6 +493,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
         sequence_length: sequence length for each sample
         tokenizer: tokenizer instance for validation (optional)
         start_file_idx: index of file to start from (for resuming training)
+        start_pos: position within the first file to start from (for precise resuming)
     
     Yields:
         dict with 'input_ids', 'attention_mask', and 'labels' keys
@@ -510,17 +511,28 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     # Create iterator starting from the specified file
     files_from_start = files[start_file_idx:] + files[:start_file_idx]
     file_iter = itertools.cycle(files_from_start)
-    tokens, pos = _load_data_shard(next(file_iter)), 0
+    
+    # Load first file and set position
+    tokens = _load_data_shard(next(file_iter))
+    pos = start_pos
+    
+    # Validate that start_pos is within bounds
+    if pos >= len(tokens):
+        # If start_pos is beyond the current file, move to next file and reset pos
+        tokens = _load_data_shard(next(file_iter))
+        pos = 0
     
     while True:
         # Check if we have enough tokens for all ranks
         if pos + total_tokens_needed >= len(tokens):
             try:
-                tokens, pos = _load_data_shard(next(file_iter)), 0
+                tokens = _load_data_shard(next(file_iter))
+                pos = 0
             except StopIteration:
                 # Reset file iterator for multi-epoch training
                 file_iter = iter(files)
-                tokens, pos = _load_data_shard(next(file_iter)), 0
+                tokens = _load_data_shard(next(file_iter))
+                pos = 0
         
         # Extract local batch for this rank
         start_idx = pos + rank * local_batch_size * sequence_length
@@ -582,7 +594,7 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
         # New flattened structure
         train_bs = cfg.train_bs
         grad_accumulate = cfg.grad_accumulate
-        max_seq_len = cfg.model_config.max_seq_len
+        max_seq_len = cfg.model.max_seq_len
     
     # Total tokens consumed = step * batch_size * grad_accumulate * world_size * seq_len
     total_tokens_consumed = step * train_bs * grad_accumulate * world_size * max_seq_len
@@ -595,9 +607,10 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
     
     print(f"Found {len(files)} training files")
     
-    # Wind forward by counting tokens in each file without loading them
+    # Wind forward by counting tokens in each file to find exact position
     tokens_consumed = 0
     file_idx = 0
+    start_pos = 0
     
     while tokens_consumed < total_tokens_consumed and file_idx < len(files):
         try:
@@ -607,8 +620,13 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
                 tokens_consumed += shard_size
                 file_idx += 1
             else:
-                # This shard contains our target position, but we'll start from the next one
-                file_idx += 1
+                # This shard contains our target position - calculate exact position within the file.
+                # Align `start_pos` to the nearest batch boundary so that all ranks
+                # start reading on a token index that is a multiple of
+                #   world_size * train_bs * seq_len
+                remainder = (total_tokens_consumed - tokens_consumed)
+                tokens_per_global_batch = train_bs * grad_accumulate * world_size * max_seq_len
+                start_pos = remainder - (remainder % tokens_per_global_batch)
                 break
         except Exception as e:
             print(f"Error reading shard {files[file_idx]}: {e}")
@@ -617,9 +635,10 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
     # If we've gone through all files, wrap around to the beginning
     if file_idx >= len(files):
         file_idx = 0
+        start_pos = 0
     
     print(f"Wound data generator to step {step} (consumed {tokens_consumed} tokens)")
-    print(f"Starting from file {files[file_idx] if file_idx < len(files) else 'beginning (wrapped around)'}")
+    print(f"Starting from file {files[file_idx] if file_idx < len(files) else 'beginning (wrapped around)'} at position {start_pos}")
     
     # Create a new data generator starting from the calculated position
     return distributed_data_generator(
@@ -629,7 +648,8 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
         world_size=world_size,
         sequence_length=max_seq_len,
         tokenizer=tokenizer,
-        start_file_idx=file_idx
+        start_file_idx=file_idx,
+        start_pos=start_pos
     )
 
 def wind(ckpt_path, step=None):
@@ -665,7 +685,7 @@ def wind(ckpt_path, step=None):
     return data_generator(config.train_files, train_seq_len, start_file_idx=file_idx)
 
 
-def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: int, tokenizer=None, start_file_idx: int = 0):
+def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: int, tokenizer=None, start_file_idx: int = 0, start_pos: int = 0):
     """
     Creates a data generator for LVAE training using .bin files.
     
@@ -676,6 +696,7 @@ def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: i
         world_size: total number of processes
         tokenizer: tokenizer instance for validation (optional)
         start_file_idx: index of file to start from (for resuming training)
+        start_pos: position within the first file to start from (for precise resuming)
     
     Returns:
         Generator that yields batches
@@ -688,7 +709,7 @@ def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: i
     else:
         # New flattened structure
         batch_size = cfg.train_bs
-        sequence_length = cfg.model_config.max_seq_len
+        sequence_length = cfg.model.max_seq_len
     
     return distributed_data_generator(
         filename_pattern=filename_pattern,
@@ -697,10 +718,11 @@ def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: i
         world_size=world_size,
         sequence_length=sequence_length,
         tokenizer=tokenizer,
-        start_file_idx=start_file_idx
+        start_file_idx=start_file_idx,
+        start_pos=start_pos
     )
 
-def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: int, tokenizer=None, start_file_idx: int = 0):
+def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: int, tokenizer=None, start_file_idx: int = 0, start_pos: int = 0):
     """
     Creates a validation data generator for LVAE training using .bin files.
     
@@ -711,6 +733,7 @@ def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_siz
         world_size: total number of processes
         tokenizer: tokenizer instance for validation (optional)
         start_file_idx: index of file to start from (for resuming training)
+        start_pos: position within the first file to start from (for precise resuming)
     
     Returns:
         Generator that yields batches
@@ -723,7 +746,7 @@ def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_siz
     else:
         # New flattened structure
         batch_size = cfg.eval_bs
-        sequence_length = cfg.model_config.max_seq_len
+        sequence_length = cfg.model.max_seq_len
     
     return distributed_data_generator(
         filename_pattern=filename_pattern,
@@ -732,76 +755,6 @@ def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_siz
         world_size=world_size,
         sequence_length=sequence_length,
         tokenizer=tokenizer,
-        start_file_idx=start_file_idx
-    )
-
-def wind_data_generator_cfm(cfg, train_bin_pattern, step, rank, world_size, tokenizer=None):
-    """
-    Wind the data generator for CFM training to the correct position for resuming training.
-    
-    Args:
-        cfg: Configuration object for CFM training
-        train_bin_pattern: Pattern for training bin files
-        step: Current training step to resume from
-        rank: Current process rank
-        world_size: Total number of processes
-        tokenizer: Tokenizer for validation (optional)
-    
-    Returns:
-        Data generator starting from the correct position
-    """
-    import glob
-    
-    # Calculate total tokens consumed up to this step
-    # CFM trainer uses different config structure
-    train_bs = cfg.training.train_bs
-    grad_accumulate = cfg.training.gradient_accumulate_every
-    max_seq_len = getattr(cfg.model, 'max_seq_len', 1024)  # CFM gets this from model config
-    
-    # Total tokens consumed = step * batch_size * grad_accumulate * world_size * seq_len
-    total_tokens_consumed = step * train_bs * grad_accumulate * world_size * max_seq_len
-    
-    # Get all training files
-    files = [Path(file) for file in sorted(glob.glob(train_bin_pattern))]
-    
-    if not files:
-        raise ValueError(f"No files found matching pattern: {train_bin_pattern}")
-    
-    print(f"Found {len(files)} training files")
-    
-    # Wind forward by counting tokens in each file without loading them
-    tokens_consumed = 0
-    file_idx = 0
-    
-    while tokens_consumed < total_tokens_consumed and file_idx < len(files):
-        try:
-            shard_size = _num_tokens_in_shard(files[file_idx])
-            if tokens_consumed + shard_size <= total_tokens_consumed:
-                # Consume the entire shard
-                tokens_consumed += shard_size
-                file_idx += 1
-            else:
-                # This shard contains our target position, but we'll start from the next one
-                file_idx += 1
-                break
-        except Exception as e:
-            print(f"Error reading shard {files[file_idx]}: {e}")
-            file_idx += 1
-    
-    # If we've gone through all files, wrap around to the beginning
-    if file_idx >= len(files):
-        file_idx = 0
-    
-    print(f"Wound CFM data generator to step {step} (consumed {tokens_consumed} tokens)")
-    print(f"Starting from file {files[file_idx] if file_idx < len(files) else 'beginning (wrapped around)'}")
-    
-    # Create a new data generator starting from the calculated position
-    return distributed_data_generator(
-        filename_pattern=train_bin_pattern,
-        batch_size=train_bs,
-        rank=rank,
-        world_size=world_size,
-        sequence_length=max_seq_len,
-        tokenizer=tokenizer,
-        start_file_idx=file_idx
+        start_file_idx=start_file_idx,
+        start_pos=start_pos
     )
