@@ -25,7 +25,7 @@ LOG_RECOMPILES=True
 QOS = "pbatch"
 
 # BANK = "guests"
-BANK = "effml"
+BANK = "guests"
 
 # TIME_LIMIT = 59  # in minutes
 # TIME_LIMIT = 15
@@ -37,7 +37,7 @@ REPETITIONS = 3
 # DEPENDENCY = "singleton"
 DEPENDENCY = None
 
-BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
+BASE_OUT_DIR = f"/p/vast1/madan2/diffusion-root/ldlm/outputs"
 
 # BASE_RUN_NAME = f"train_lvae_dist_debug_sweep"
 BASE_RUN_NAME = f"train_lvae_dist_prod"
@@ -45,15 +45,15 @@ BASE_RUN_NAME = f"train_lvae_dist_prod"
 # INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 
-TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
+TGT_TOKENS = 10e9  # 100B tokens for 3 epochs
 
 # Cfgs
 # gpn = gpus per node
 # arg list is:
 # script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr, ...
 exp_list = [
-    ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4],
-    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4],
+    ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 1, 4, 256, 2, 128, 1e-4],
 ]
 
 final_exp_list = exp_list

@@ -18,7 +18,7 @@ import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from autoencoder.train_lvae_distributed import main, TrainingConfig
+from autoencoder.train_lvae_bb_distributed import main, TrainingConfig
 
 print(f"Importing complete in run_distributed_training.py", flush=True)
 
@@ -46,6 +46,7 @@ def create_training_config(cfg: DictConfig) -> TrainingConfig:
         muon_lr=cfg.muon_lr,
         muon_momentum=cfg.muon_momentum,
         kld_weight=cfg.kld_weight,
+        dataset_name=cfg.dataset_name,
         kld_annealing_steps=cfg.get('kld_annealing_steps', 2000),
         seed=cfg.get('seed', 42),
         log_step_interval=cfg.get('log_step_interval', 50),
@@ -58,7 +59,7 @@ def create_training_config(cfg: DictConfig) -> TrainingConfig:
     
     return training_cfg
 
-@hydra.main(version_base=None, config_path="conf", config_name="train_lvae_dist")
+@hydra.main(version_base=None, config_path="conf", config_name="train_lvae_dist_llnl_multilat")
 def main_script(cfg: DictConfig) -> None:
     """Main script entry point with Hydra configuration"""
 
@@ -79,9 +80,14 @@ def main_script(cfg: DictConfig) -> None:
         # Get the original command line arguments
         original_args = sys.argv[1:]
         
+        print(f"==> Resuming from {cfg.resume_from} <==")
         # Run with torchrun
         cmd = [
-            "torchrun",
+            # "torchrun",
+            sys.executable,
+            "-m", 
+            "torch.distributed.run",
+            
             "--standalone",
             f"--nproc_per_node={num_gpus}",
             __file__

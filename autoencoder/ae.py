@@ -190,6 +190,38 @@ class PerceiverAttention(nn.Module):
         return self.proj_o(out)
 
 
+class MultiHeadAttn(nn.Module): 
+
+    def __init__(self, cfg: Config) -> None: 
+        super().__init__()
+       
+        inner_dim = cfg.dim
+        self.heads = inner_dim // cfg.dim_head
+        self.scale = 1. / sqrt(cfg.dim_head)
+
+        self.proj_qkv = nn.Linear(inner_dim, 3 * inner_dim, bias = False, device=cfg.dev) 
+        self.proj_o = nn.Linear(inner_dim, inner_dim, bias = False, device=cfg.dev)
+
+        self.rope = RoPE(cfg, cfg.dim_head, device=cfg.dev) 
+    
+    def forward(self, 
+                x: torch.Tensor, 
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        qkv = self.proj_qkv(x)
+        q, k, v = rearrange(qkv, "b s (l h d) -> l b h s d", l = 3, h = self.heads)
+
+        q, k = self.rope(q, k)
+        sim = (q @ k.transpose(-2, -1)) * self.scale 
+
+        if mask is None:
+            mask = torch.triu(torch.ones_like(sim), diagonal = 1).bool()
+        sim = F.softmax(torch.where(~mask, sim, torch.finfo(sim.dtype).min), dim = -1)
+
+        attn = sim @ v 
+        out = rearrange(attn, "b h s d -> b s (h d)", h = self.heads)
+
+        return self.proj_o(out)
+
 class AutoEncodingBlock(nn.Module):
 
     def __init__(self, cfg: Config):
@@ -247,6 +279,7 @@ class PerceiverResampler(nn.Module):
 class VariationalAutoEncoder(nn.Module):
     def __init__(self, cfg_enc: Config, cfg_dec: Config, create_encoder: bool = True) -> None:
         super().__init__()
+
         if create_encoder:
             self.encoder = PerceiverResampler(cfg_enc)
             self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
@@ -257,7 +290,8 @@ class VariationalAutoEncoder(nn.Module):
         self.decoder = PerceiverResampler(cfg_dec)
 
     def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encodes the input and returns the mean and log-variance vectors."""
+        """ Encodes the input and returns the mean and log-variance vectors. """
+
         if self.encoder is None:
             raise ValueError("Cannot encode without an encoder. Model was initialized with create_encoder=False.")
         
@@ -266,9 +300,9 @@ class VariationalAutoEncoder(nn.Module):
         
         return mu, log_var
 
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, only_mu: bool = False) -> torch.Tensor:
+    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
         """Reparameterizes the latent space. If only_mu is True, returns the mean."""
-        if only_mu:
+        if mu_only:
             return mu
         std = torch.exp(0.5 * log_var)  
         eps = torch.randn_like(std)     
@@ -281,7 +315,7 @@ class VariationalAutoEncoder(nn.Module):
     def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
         recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
 
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).mean()
+        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=[1, 2]).mean()
 
         total_loss = recon_loss + kld_loss
         
@@ -298,12 +332,47 @@ class VariationalAutoEncoder(nn.Module):
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
     
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
-        z = self.reparameterize(mu, log_var)
+        z = self.reparameterize(mu, log_var, mu_only)
         recon_x = self.decode(z)
         return recon_x, mu, log_var
 
+
+class DecodingARBlock(nn.Module): 
+
+    def __init__(self, cfg: Config) -> None: 
+        super().__init__() 
+
+        self.attn = MultiHeadAttn(cfg)
+        self.ffn = FeedForward(cfg, cfg.dim) 
+
+        # norms 
+        self.attn_norm = nn.LayerNorm(cfg.dim)
+        self.ffn_norm = nn.LayerNorm(cfg.dim)
+
+    def forward(self, 
+                x: torch.Tensor, 
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = x + self.attn(self.attn_norm(x), mask = mask)
+        x = x + self.ffn(self.ffn_norm(x))
+        return x
+
+
+class ARDecoder(nn.Module):
+
+    def __init__(self, 
+                 cfg: Config, 
+                 num_layers: int = 4) -> None: 
+        super().__init__()
+        self.blcks = nn.ModuleList([DecodingARBlock(cfg) for _ in range(num_layers)])
+        
+    def forward(self, 
+                x: torch.Tensor, 
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        for blck in self.blcks:
+            x = blck(x, mask = mask)
+        return x
 
 if __name__ == "__main__":
     e_cfg, d_cfg = create_enc_dec_cfg(dim=1024, latent_dim=512, num_latents=16, model_dim=1024, max_tokens=1024)

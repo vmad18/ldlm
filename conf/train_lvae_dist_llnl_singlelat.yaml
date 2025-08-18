@@ -8,7 +8,7 @@ per_process_vram_ratio: 0.8
 model:
   vocab_size: 50257
   d_model: 768
-  latent_dim: 2048
+  latent_dim: 1536
   num_latents: 1
   dim_head: 128
   max_seq_len: 128
@@ -27,7 +27,10 @@ compile_model: True
 # Data configuration
 train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
 val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
-total_tokens: 100000000000  # 100B tokens
+# total_tokens: 100000000000  # 100B tokens
+total_tokens: 10000000000
+dataset_name: "fineweb-edu_10b"
+num_samples: null
 
 # Optimization configuration
 learning_rate: 1e-4

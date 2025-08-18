@@ -14,5 +14,14 @@ Report/
 # jwk: maybe I'm missing some uv boilerplate in bashrc or smthn
 .venv
 
+# v18 testing files/scripts
+test_lvae_bb_dist.py
+outputs_cfm/
+outputs_lvae/
+results_test/
+test_run/
+run_lvae_test.py
+tuolumne*.core
+
 # mi installer
 !install*.sh

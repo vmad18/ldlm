@@ -1,7 +1,7 @@
 [project]
 name = "ldlm"
 version = "0.1.0"
-requires-python = "==3.12.11"
+requires-python = "==3.12.10"
 dependencies = [
     "absl-py==2.1.0",
     "accelerate==1.7.0",
@@ -137,6 +137,7 @@ dependencies = [
     "olefile==0.46",
     "opt-einsum==3.3.0",
     "optree==0.13.1",
+    "optuna",
     "packaging==21.3",
     "pandas==2.3.0",
     "parso==0.8.1",

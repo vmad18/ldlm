@@ -24,6 +24,7 @@ from dataset_util.dataset_helper import get_dataset, get_dataloader_lvae, get_da
 from omegaconf import DictConfig, OmegaConf
 
 from diffusion.cond_flow_matcher import ConditionalFlowMatcher
+from diffusion.ddpm import DDPMScheduler
 from diffusion.neural_diffusion import DiTModel, DiTConfig
 
 from accelerate import Accelerator, DistributedDataParallelKwargs, InitProcessGroupKwargs
@@ -81,19 +82,27 @@ def default(val, d):
 
 def euler_solver(
                 x_0: torch.Tensor, 
+                y_cond: torch.Tensor,
                 t_steps: torch.Tensor, 
                 model: DiTModel, 
+                t_scale: float,
                 pbar=None):
     x = x_0
     dt = t_steps[1] - t_steps[0]
+    guidance_scale = 1.5
 
     for t_step in range(t_steps.shape[0] - 1):
         t = t_steps[t_step] * torch.ones(x_0.shape[0], device=x_0.device)
         t = ConditionalFlowMatcher.pad_t_like_x(t, x)
-        dx = model(x, t, x_0)  # approx. trajectory step
-        # print(dx - x_0)
-        x = x + dx * dt  # euler integrate
+        dx_uncond = model(x, t * t_scale, y_cond, True)  # approx. uncond trajectory step
 
+        if guidance_scale > 0:
+            dx_cond = model(x, t * t_scale, y_cond, False)  # approx. cond trajectory step
+            dx = dx_uncond +  guidance_scale * (dx_cond - dx_uncond)
+        else:
+            dx = dx_uncond
+
+        x = x + dx * dt  # euler integrate
         if pbar is not None:
             pbar.update(1)
     return x
@@ -101,6 +110,8 @@ def euler_solver(
 
 def gen_samples(
         model: DiTModel,
+        y_cond: torch.Tensor,
+        t_scale: float, 
         num_latents: int,
         dim_latents: int,
         batch_size: int,
@@ -109,15 +120,68 @@ def gen_samples(
         target_dtype: torch.dtype,
         method: str = "euler"):
     # The caller of this function should handle model.eval() and model.train()
+    model.eval()
     with torch.no_grad():
         x_0 = torch.randn((batch_size, num_latents, dim_latents), device=accelerator.device, dtype=target_dtype)
         t_steps = torch.linspace(0, 1, steps + 1, device=accelerator.device)
 
         if method == "euler":
-            traj = euler_solver(x_0, t_steps, model, None)
+            traj = euler_solver(x_0, y_cond, t_steps, model, t_scale, None)
         else:
             raise NotImplementedError
     return traj
+
+
+
+
+def gen_samples_ddpm(
+    model: DiTModel,
+    scheduler: DDPMScheduler,
+    y_cond: torch.Tensor,
+    num_latents: int,
+    dim_latents: int,
+    batch_size: int,
+    accelerator: Accelerator,
+    steps: int,  # number of inference steps
+    guidance_scale: float = 1.5,
+    target_dtype: torch.dtype = torch.float32,
+):
+    """
+    Generates samples using the DDPM reverse diffusion process.
+    """
+    model.eval()
+    
+    # 1. Set the discrete timesteps for the scheduler's reverse process
+    scheduler.set_timesteps(num_inference_steps=steps, device=accelerator.device)
+    
+    # 2. Start with a random noise tensor (this is the sample at the final timestep T)
+    latents = torch.randn(
+        (batch_size, num_latents, dim_latents), 
+        device=accelerator.device, 
+        dtype=target_dtype
+    )
+
+    with torch.no_grad():
+        # 3. Denoising loop, iterating from T-1 down to 0
+        pbar = tqdm(scheduler.timesteps, disable=not accelerator.is_main_process)
+        for t in pbar:
+            # Prepare a batch of timesteps for the model
+            t_batch = t.expand(batch_size)
+
+            # 4. Predict the noise using the model (with Classifier-Free Guidance)
+            noise_pred_uncond = model(latents, t_batch, y_cond, True)  # Unconditional
+            noise_pred_cond = model(latents, t_batch, y_cond, False) # Conditional
+            
+            # Combine predictions using the guidance scale
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            
+            # 5. Compute the previous noisy sample x_{t-1} using the scheduler's step function
+            latents = scheduler.step(model_output=noise_pred, timestep=t, sample=latents)
+
+    # The final `latents` tensor is the clean sample at t=0
+    return latents
+
+
 
 
 def compute_grad_norm(parameters):
@@ -351,6 +415,12 @@ class Trainer(object):
         self.num_latents = self.ae.num_latents
         self.latent_dim = self.ae.latent_dim
         
+        print("==> Creating ConditionalFlowMatcher...")
+
+        
+        self.fm = ConditionalFlowMatcher()
+        self.ddpm_schedule = DDPMScheduler()
+
         if self.accelerator.is_main_process:
             # Use the same config hash for wandb run name as used for directory
             cfg_str = OmegaConf.to_yaml(cfg, resolve=True)
@@ -358,9 +428,9 @@ class Trainer(object):
             
             wandb_init_kwargs = {"dir": str(self.output_dir)}
             if cfg.general.wandb_name:
-                wandb_init_kwargs["name"] = f"{cfg.general.wandb_name}-{cfg_hash[:8]}"
+                wandb_init_kwargs["name"] = f"{cfg.general.wandb_name}-{cfg_hash[:8]}-seq_len-{loaded_vae_cfg.model.max_seq_len}-{self.ddpm_schedule.num_train_timesteps}"
             else:
-                wandb_init_kwargs["name"] = f"cfm_diffusion-{cfg_hash[:8]}"
+                wandb_init_kwargs["name"] = f"cfm_diffusion-{cfg_hash[:8]}-seq_len-{loaded_vae_cfg.model.max_seq_len}-{self.ddpm_schedule.num_train_timesteps}"
             
             self.accelerator.init_trackers(
                 project_name="ldlm_diffusion",
@@ -368,8 +438,6 @@ class Trainer(object):
                 init_kwargs={"wandb": wandb_init_kwargs}
             )
 
-        print("==> Creating ConditionalFlowMatcher...")
-        self.fm = ConditionalFlowMatcher()
 
         cfg_dit = DiTConfig()
         cfg_dit.dim = cfg.model.dim
@@ -419,7 +487,7 @@ class Trainer(object):
                     'eval_bs': cfg.training.eval_bs
                 },
                 'model': {
-                    'max_seq_len': loaded_vae_cfg.model.max_seq_len
+                    'max_seq_len': loaded_vae_cfg.model.max_seq_len * 2
                 }
             })
             
@@ -454,13 +522,13 @@ class Trainer(object):
             loaded_vae_cfg.training.train_bs = cfg.training.train_bs
             self.dataloader = get_dataloader_lvae(
                 loaded_vae_cfg, self.dataset['train'], self.tokenizer,
-                loaded_vae_cfg.model.max_seq_len
+                loaded_vae_cfg.model.max_seq_len * 2
             )
             
             loaded_vae_cfg.training.eval_bs = cfg.training.eval_bs
             self.val_dataloader = get_dataloader_lvae(
                 loaded_vae_cfg, self.dataset['valid'], self.tokenizer,
-                loaded_vae_cfg.model.max_seq_len, shuffle=False
+                loaded_vae_cfg.model.max_seq_len * 2, shuffle=False
             )
 
         self.train_num_steps = cfg.training.train_num_steps
@@ -469,7 +537,6 @@ class Trainer(object):
         self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader = self.accelerator.prepare(
             self.v_predictor, self.ema_model, self.opt, self.lr_scheduler, self.dataloader, self.val_dataloader)
 
-        # Handle checkpoint loading/resuming
         if cfg.general.get('checkpoint_path') is not None:
             if self.accelerator.is_main_process:
                 print(f"Loading checkpoint from: {cfg.general.checkpoint_path}")
@@ -508,7 +575,7 @@ class Trainer(object):
                         'gradient_accumulate_every': cfg.training.grad_accumulate
                     },
                     'model': {
-                        'max_seq_len': loaded_vae_cfg.model.max_seq_len
+                        'max_seq_len': loaded_vae_cfg.model.max_seq_len * 2
                     }
                 })
                 
@@ -538,7 +605,8 @@ class Trainer(object):
             # Traditional data loaders need to be wrapped with cycle
             self.data_iter = cycle(self.dataloader)
             self.val_iter = cycle(self.val_dataloader)
-            
+        
+        self.t_scale: float = 10000
         self.best_val_loss = float('inf')
 
     def save(self, file_name='model.pt') -> None:
@@ -569,15 +637,15 @@ class Trainer(object):
 
         model = self.accelerator.unwrap_model(self.v_predictor)
         ema_model = self.accelerator.unwrap_model(self.ema_model)
-        model.load_state_dict(data['model'])
+        model.load_state_dict(data['model'], strict=False)
         
         if self.accelerator.is_local_main_process:
-            ema_model.load_state_dict(data['ema_model'])
+            ema_model.load_state_dict(data['ema_model'],  strict=False)
 
         model.to(self.accelerator.device)
         ema_model.to(self.accelerator.device) 
 
-        self.step = data['step']
+        self.step = 0 # data['step']
         if 'best_val_loss' in data:
             self.best_val_loss = data['best_val_loss']
 
@@ -590,17 +658,17 @@ class Trainer(object):
 
         model = self.accelerator.unwrap_model(self.v_predictor)
         ema_model = self.accelerator.unwrap_model(self.ema_model)
-        model.load_state_dict(data['model'])
+        model.load_state_dict(data['model'],  strict=False)
         
         if 'ema_model' in data:
-            ema_model.load_state_dict(data['ema_model'])
+            ema_model.load_state_dict(data['ema_model'],  strict=False)
 
         model.to(self.accelerator.device)
         ema_model.to(self.accelerator.device) 
 
         # Load training state
         if 'step' in data:
-            self.step = data['step']
+            self.step = 0 # data['step']
             if self.accelerator.is_main_process:
                 print(f"Resuming from step: {self.step}")
 
@@ -611,17 +679,17 @@ class Trainer(object):
 
         if resume_training:
             if 'opt' in data:
-                self.opt.load_state_dict(data['opt'])
+                # self.opt.load_state_dict(data['opt'])
                 if self.accelerator.is_main_process:
                     print("Loaded optimizer state.")
             
             if 'scheduler' in data:
-                self.lr_scheduler.load_state_dict(data['scheduler'])
+                # self.lr_scheduler.load_state_dict(data['scheduler'])
                 if self.accelerator.is_main_process:
                     print("Loaded scheduler state.")
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
-            self.accelerator.scaler.load_state_dict(data['scaler'])
+            # self.accelerator.scaler.load_state_dict(data['scaler'])
             if self.accelerator.is_main_process:
                 print("Loaded scaler state.")
 
@@ -661,7 +729,9 @@ class Trainer(object):
         device = accelerator.device
         last_val_loss = float('nan')
         last_ema_val_loss = float('nan')
-    
+
+        t_scale: float = self.t_scale
+
         with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
             while self.step < self.train_num_steps:
                 total_loss = 0.
@@ -672,15 +742,39 @@ class Trainer(object):
 
                     with accelerator.accumulate(self.v_predictor):
                         with torch.no_grad():
-                            latent = self.ae.get_latents(input_ids=batch['input_ids'], attn_mask=batch.get('attention_mask'))
-                        
-                        latent = latent.to(dtype=self.model_dtype)
 
-                        x_0 = torch.randn_like(latent)
-                        t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
-                        v_t = self.v_predictor(x_t, t, x_0)
-                        loss = F.mse_loss(v_t.float(), u_t.float())
+                            bsz, s = batch['input_ids'].shape
+
+                            cond, trgt = batch['input_ids'].chunk(2, dim=-1)
+                            cond_mask, trgt_mask = batch.get('attention_mask').chunk(2, dim=-1)
+
+                            latent_cond = self.ae.get_latents(input_ids=cond, attn_mask=cond_mask)
+                            latent_trgt = self.ae.get_latents(input_ids=trgt, attn_mask=trgt_mask)
+
+                        latent_cond = latent_cond.to(dtype=self.model_dtype)
+                        latent_trgt = latent_trgt.to(dtype=self.model_dtype)
+
+                        # x_0 = torch.randn_like(latent_trgt)
+                        # t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent_trgt)
+                        # v_t = self.v_predictor(x_t, t_scale * t, latent_cond)
+                        # loss = F.mse_loss(v_t.float(), u_t.float())
                         
+
+                        noise = torch.randn_like(latent_trgt)
+                        # 3. Sample a random timestep t for each sample in the batch.
+                        timesteps = torch.randint(0, self.ddpm_schedule.num_train_timesteps, (bsz,), device=device).long()
+                        
+                        # 4. Create the noisy latent x_t using the DDPM scheduler.
+                        noisy_latents = self.ddpm_schedule.add_noise(latent_trgt, noise, timesteps)
+                        
+                        # 5. Get the model's prediction for the noise.
+                        # Note: your model is named v_predictor but it will now predict noise.
+                        predicted_noise = self.v_predictor(noisy_latents, timesteps, latent_cond)
+                        
+                        # 6. Calculate the loss between the predicted noise and the actual noise.
+                        loss = F.mse_loss(predicted_noise.float(), noise.float())
+                        
+                        # --- End of changed section ---
                         total_loss += loss.detach() / self.gradient_accumulate_every
                         accelerator.backward(loss)
                 
@@ -737,17 +831,45 @@ class Trainer(object):
                                 val_batch = next(self.val_iter)
                                 val_batch = {k: v.to(device) for k, v in val_batch.items()}
                                 with torch.no_grad():
-                                    latent = self.ae.get_latents(input_ids=val_batch['input_ids'], attn_mask=val_batch.get('attention_mask'))
-                                
-                                latent = latent.to(dtype=self.model_dtype)
-                                x_0 = torch.randn_like(latent)
-                                t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent)
-                                
-                                v_t = self.v_predictor(x_t, t, x_0)
-                                total_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
+                                    bsz, s = val_batch['input_ids'].shape
 
-                                v_t = self.ema_model(x_t, t, x_0)
-                                total_ema_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
+                                    cond, trgt = val_batch['input_ids'].chunk(2, dim=-1)
+                                    cond_mask, trgt_mask = val_batch.get('attention_mask').chunk(2, dim=-1)
+
+                                    latent_cond = self.ae.get_latents(input_ids=cond, attn_mask=cond_mask)
+                                    latent_trgt = self.ae.get_latents(input_ids=trgt, attn_mask=trgt_mask)
+                                    
+                                    # latent = self.ae.get_latents(input_ids=val_batch['input_ids'], attn_mask=val_batch.get('attention_mask'))
+                                
+
+                                latent_cond = latent_cond.to(dtype=self.model_dtype)
+                                latent_trgt = latent_trgt.to(dtype=self.model_dtype)
+
+                                # x_0 = torch.randn_like(latent_trgt)
+                                # t, x_t, u_t = self.fm.get_sample_location_and_conditional_flow(x_0, latent_trgt)
+                                
+                                # v_t = self.v_predictor(x_t, t_scale * t, latent_cond)
+                                # total_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
+                                
+                                # v_t = self.ema_model(x_t, t_scale * t, latent_cond)
+                                # total_ema_val_loss += F.mse_loss(v_t.float(), u_t.float()).item()
+
+
+                                noise = torch.randn_like(latent_trgt)
+                                # 3. Sample a random timestep t for each sample in the batch.
+                                timesteps = torch.randint(0, self.ddpm_schedule.num_train_timesteps, (bsz,), device=device).long()
+                                
+                                # 4. Create the noisy latent x_t using the DDPM scheduler.
+                                noisy_latents = self.ddpm_schedule.add_noise(latent_trgt, noise, timesteps)
+                                
+                                # 5. Get the model's prediction for the noise.
+                                # Note: your model is named v_predictor but it will now predict noise.
+                                predicted_noise = self.v_predictor(noisy_latents, timesteps, latent_cond)
+                                
+                                # 6. Calculate the loss between the predicted noise and the actual noise.
+                                total_val_loss += F.mse_loss(predicted_noise.float(), noise.float()).item()
+                                total_ema_val_loss += F.mse_loss(predicted_noise.float(), noise.float()).item()
+
 
                             last_val_loss = total_val_loss / num_val_batches
                             last_ema_val_loss = total_ema_val_loss / num_val_batches
@@ -774,10 +896,10 @@ class Trainer(object):
                     pbar.update(1)
 
                     if accelerator.is_main_process and self.step > 0 and (self.step % self.save_and_sample_every == 0):
-                        self.eval()
+                        self.eval(y_cond=latent_cond)
 
     @torch.no_grad()
-    def eval(self, verbose: bool = False) -> None:
+    def eval(self, y_cond: torch.Tensor, verbose: bool = True) -> None:
         accelerator = self.accelerator
         model_for_generation = self.accelerator.unwrap_model(self.ema_model)
         model_for_generation.eval()
@@ -785,12 +907,16 @@ class Trainer(object):
 
         generated_texts = []
         pbar = tqdm(range(0, self.num_gen_samples, self.gen_batch_size), desc=f"Generating {self.num_gen_samples} samples")
+        
+        y_cond = y_cond[:self.num_gen_samples, ...]
 
         for i in pbar:
             batch_size = min(self.gen_batch_size, self.num_gen_samples - i)
             
             latents = gen_samples(
                 model=model_for_generation,
+                y_cond=y_cond,
+                t_scale = self.t_scale,
                 num_latents=self.num_latents,
                 dim_latents=self.latent_dim,
                 batch_size=batch_size,
@@ -799,6 +925,21 @@ class Trainer(object):
                 target_dtype=self.model_dtype,
                 method="euler"
             )
+
+            # latents = gen_samples_ddpm(
+            #     model = model_for_generation, 
+            #     scheduler=self.ddpm_schedule,
+            #     y_cond=y_cond,
+            #     num_latents=self.num_latents,
+            #     dim_latents=self.latent_dim,
+            #     batch_size=batch_size,
+            #     accelerator=self.accelerator,
+            #     steps = self.ddpm_schedule.num_train_timesteps, 
+            #     guidance_scale = 1.5,
+            # )
+
+
+
             with torch.no_grad():
                 # This seems to be a custom function in the old VAE, replacing with the standard one
                 output_ids_list = self.ae.decode_latent(latents)
@@ -813,15 +954,17 @@ class Trainer(object):
                     print()
                     print()
 
-            try:
-                table = wandb.Table(columns=["step", "sample_id", "generated_text"])
-                for j, text in enumerate(decoded_batch):
-                    table.add_data(self.step, i+j, text)
-                self.accelerator.log({"generated_samples": table}, step=self.step)
-            except ImportError:
-                print("wandb not installed, skipping logging of generated samples.")
+            if not verbose:
+                try:
+                    table = wandb.Table(columns=["step", "sample_id", "generated_text"])
+                    for j, text in enumerate(decoded_batch):
+                        table.add_data(self.step, i+j, text)
+                    self.accelerator.log({"generated_samples": table}, step=self.step)
+                except ImportError:
+                    print("wandb not installed, skipping logging of generated samples.")
 
-        pbar.set_description(f"Generated {len(generated_texts)} samples")
+                pbar.set_description(f"Generated {len(generated_texts)} samples")
+
         # print(generated_texts)
         # print("\nEvaluation finished.")
         # Make sure to set the model back to train mode
