@@ -206,14 +206,15 @@ class MultiHeadAttn(nn.Module):
     
     def forward(self, 
                 x: torch.Tensor, 
-                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                mask: Optional[torch.Tensor] = None,
+                use_mask: bool = True) -> torch.Tensor:
         qkv = self.proj_qkv(x)
         q, k, v = rearrange(qkv, "b s (l h d) -> l b h s d", l = 3, h = self.heads)
 
         q, k = self.rope(q, k)
         sim = (q @ k.transpose(-2, -1)) * self.scale 
 
-        if mask is None:
+        if mask is None and use_mask:
             mask = torch.triu(torch.ones_like(sim), diagonal = 1).bool()
         sim = F.softmax(torch.where(~mask, sim, torch.finfo(sim.dtype).min), dim = -1)
 
@@ -227,28 +228,33 @@ class AutoEncodingBlock(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__() 
 
+        self.attn_toks = MultiHeadAttn(cfg)
         self.attn = PerceiverAttention(cfg) 
+
         self.ffn1 = FeedForward(cfg, cfg.dim)
         self.ffn2 = FeedForward(cfg, cfg.latent_dim)
 
-        self.ln1 = nn.LayerNorm(cfg.dim, device = cfg.dev)
-        self.ln2 = nn.LayerNorm(cfg.latent_dim, device = cfg.dev) 
+        self.attn_toks_ln = nn.LayerNorm(cfg.dim)
+        self.ffn1_ln = nn.LayerNorm(cfg.dim)
+        self.ffn2_ln = nn.LayerNorm(cfg.latent_dim) 
 
     def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        latents = self.attn(x, latents, mask) + latents
-        x_trans = self.ffn1(self.ln1(x)) + x 
-        latents = self.ffn2(self.ln2(latents)) + latents 
+        latents = latents + self.attn(x, latents, mask)
+        
+        x = x + self.attn_toks(self.attn_toks_ln(x))
+        x = x + self.ffn1(self.ffn1_ln(x)) 
+        latents = latents + self.ffn2(self.ffn2_ln(latents)) 
 
-        return x_trans, latents
+        return x, latents
 
 class PerceiverResampler(nn.Module): 
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
 
-        self.pos_embed = AbsolutePositionalEmbedding(cfg, cfg.dim)
+        # self.pos_embed = AbsolutePositionalEmbedding(cfg, cfg.dim)
 
-        self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim), device=cfg.dev))
+        self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim))) 
         nn.init.normal_(self.latents, std = 0.02) 
 
         self.blocks = nn.ModuleList([])
@@ -257,12 +263,12 @@ class PerceiverResampler(nn.Module):
             self.blocks.append(AutoEncodingBlock(cfg))
 
         self.f_attn = PerceiverAttention(cfg)
-        self.latent_norm = nn.LayerNorm(cfg.latent_dim, device=cfg.dev)
+        self.latent_norm = nn.LayerNorm(cfg.latent_dim)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, *_ = x.shape
 
-        x = x + self.pos_embed(x)
+        # x = x  + self.pos_embed(x)
         
         latents = repeat(self.latents, "n d -> b n d", b = x.shape[0])
 
@@ -270,9 +276,7 @@ class PerceiverResampler(nn.Module):
             x, latents = block(x, latents, mask)
 
         latents = self.f_attn(x, latents, mask)
-
         latents = self.latent_norm(latents)
-
         return latents
 
 
@@ -282,7 +286,7 @@ class VariationalAutoEncoder(nn.Module):
 
         if create_encoder:
             self.encoder = PerceiverResampler(cfg_enc)
-            self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
+            self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim)
         else:
             self.encoder = None
             self.mu_lsigma = None
@@ -301,9 +305,7 @@ class VariationalAutoEncoder(nn.Module):
         return mu, log_var
 
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
         """Reparameterizes the latent space. If only_mu is True, returns the mean."""
-        if mu_only:
         if mu_only:
             return mu
         std = torch.exp(0.5 * log_var)  
@@ -316,9 +318,7 @@ class VariationalAutoEncoder(nn.Module):
 
     def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
         recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
-
         kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
-
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
@@ -329,15 +329,13 @@ class VariationalAutoEncoder(nn.Module):
             print(f"  --> recon_x shape: {recon_x.shape}")
             print(f"  --> x shape:       {x.shape}")
         recon_loss = F.mse_loss(recon_x, x, reduction='mean')
-        kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
     
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
-        z = self.reparameterize(mu, log_var, mu_only)
         z = self.reparameterize(mu, log_var, mu_only)
         recon_x = self.decode(z)
         return recon_x, mu, log_var
@@ -348,6 +346,7 @@ class DecodingARBlock(nn.Module):
     def __init__(self, cfg: Config) -> None: 
         super().__init__() 
 
+        # mixers
         self.attn = MultiHeadAttn(cfg)
         self.ffn = FeedForward(cfg, cfg.dim) 
 

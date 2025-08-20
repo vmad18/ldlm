@@ -287,6 +287,7 @@ class LatentVAEModel(BartForConditionalGeneration):
             encoder_outputs_from_vae, vae_loss, _ = self.autoencode(input_ids, attention_mask=attention_mask)
             
             # Pass the reconstructed embeddings to the BART decoder to calculate LM loss
+            # 
             lm_loss = super().forward(labels=labels, encoder_outputs=encoder_outputs_from_vae, **kwargs).loss
 
             return {
@@ -318,13 +319,13 @@ def get_latent_vae_tokenizer_bart(
 
     # These are the args that are defined in `ae.Config`
     vae_params = {
-        'expansion_factor': getattr(args.model_config, 'expansion_factor', 4),
-        'dim_head': getattr(args.model_config, 'dim_head', 128),
+        'expansion_factor': getattr(args.model, 'expansion_factor', 4),
+        'dim_head': getattr(args.model, 'dim_head', 128),
         # The VAE config uses 'num_layers', but the Perceiver code expects 'layers_p'
-        'layers_p': getattr(args.model_config, 'num_layers', 8), 
-        'use_rope': getattr(args.model_config, 'use_rope', True),
-        'qk_norm': getattr(args.model_config, 'qk_norm', False),
-        'max_tokens': getattr(args.model_config, 'max_seq_len', 1024),
+        'layers_p': getattr(args.model, 'num_layers', 12), 
+        'use_rope': getattr(args.model, 'use_rope', True),
+        'qk_norm': getattr(args.model, 'qk_norm', False),
+        'max_tokens': getattr(args.model, 'max_seq_len', 128),
         # 'model_dim' is equivalent to 'dim' for the VAE's internal workings.
         # We pass it explicitly below to avoid confusion.
         # 'latent_dim' and 'num_latents' are also passed explicitly.
@@ -339,9 +340,9 @@ def get_latent_vae_tokenizer_bart(
     model = LatentVAEModel.from_bart_pretrained(
         bart_model,
         # VAE structural parameters
-        dim = args.model_config.d_model,
-        latent_dim = args.model_config.latent_dim,
-        num_latents = args.model_config.num_latents,
+        dim = args.model.d_model,
+        latent_dim = args.model.latent_dim,
+        num_latents = args.model.num_latents,
         # Control flow parameters
         use_precomputed_latents = getattr(args, 'use_precomputed_latents', False),
         create_encoder = getattr(args, 'create_encoder', True),

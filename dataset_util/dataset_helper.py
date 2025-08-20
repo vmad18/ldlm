@@ -15,6 +15,7 @@ import torch
 from datasets import load_from_disk
 
 from .collator import DataCollatorForBartDenoisingLM, DataCollatorForLatentVAE, DataCollatorForLatentVAET5
+from transformers.models.bart.modeling_bart import BartForConditionalGeneration, shift_tokens_right
 
 NUM_PROC = min(cpu_count(),64) # probably seeing hyperthreading, don't clobber the node
 
@@ -463,6 +464,8 @@ def get_dataloader_lvae_t5(
     return dl
 
 
+
+
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader for .bin files
 
@@ -481,7 +484,19 @@ def _load_data_shard(file: Path):
         assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
     return tokens
 
-def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int, sequence_length: int, tokenizer=None, start_file_idx: int = 0, start_pos: int = 0):
+def distributed_data_generator(
+                            filename_pattern: str, 
+                            batch_size: int, 
+                            rank: int, 
+                            world_size: int, 
+                            sequence_length: int, 
+                            tokenizer=None, 
+                            untokenizer_gpt=None,
+                            use_ar_decoding: bool = False,
+                            decoder_start_token_id: Optional[int] = None,
+                            pad_token_id: Optional[int] = None,
+                            start_file_idx: int = 0, 
+                            start_pos: int = 0):
     """
     Generator that yields batches from .bin files in the format expected by LatentVAE.
     
@@ -514,6 +529,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     
     # Load first file and set position
     tokens = _load_data_shard(next(file_iter))
+
     pos = start_pos
     
     # Validate that start_pos is within bounds
@@ -534,6 +550,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
                 tokens = _load_data_shard(next(file_iter))
                 pos = 0
         
+
         # Extract local batch for this rank
         start_idx = pos + rank * local_batch_size * sequence_length
         batch_tokens = tokens[start_idx:start_idx + local_batch_size * sequence_length]
@@ -543,16 +560,52 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 
         # Convert to CUDA tensors
         inputs = batch_tokens.to(device="cuda", dtype=torch.int32, non_blocking=True)
-        
+
+        text = untokenizer_gpt.batch_decode(
+            batch_tokens.tolist(),  # convert tensor -> list of lists
+            skip_special_tokens=False
+        )
+
+        # 2. Retokenize with new tokenizer (limit length 128)
+        inputs_dict = tokenizer(
+            text,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors="pt"
+        )
+
+        # 3. Move new input_ids to CUDA if needed
+        inputs = inputs_dict["input_ids"].to(device="cuda", non_blocking=True)
+
         # Create attention mask (all ones since we're not using padding in this format)
-        attention_mask = torch.ones_like(inputs, dtype=torch.int64)
-        
+        attention_mask = torch.ones_like(inputs, dtype=torch.int64) # inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64)
+
         # Create batch dict in the format expected by the model
         batch = {
             "input_ids": inputs,
             "attention_mask": attention_mask,
         }
         
+        if use_ar_decoding:
+            if tokenizer is None:
+                assert pad_token_id is not None and decoder_start_token_id is not None, "Expected pad token and start token ids!"
+                batch["labels"] = batch["input_ids"].clone() 
+                batch["decoder_input_ids"] = shift_tokens_right(
+                        batch["labels"], pad_token_id, decoder_start_token_id
+                    )
+                batch['labels'][batch['labels'] == pad_token_id] = -100
+                batch["decoder_attention_mask"] = (batch["decoder_input_ids"] != pad_token_id).long()
+            else:
+                assert decoder_start_token_id is not None, "Expected decoder start token id!"
+                batch["labels"] = batch["input_ids"].clone() 
+                batch["decoder_input_ids"] = shift_tokens_right(
+                        batch["labels"], tokenizer.pad_token_id, decoder_start_token_id
+                    )
+                batch['labels'][batch['labels'] == tokenizer.pad_token_id] = -100
+                batch["decoder_attention_mask"] = (batch["decoder_input_ids"] != tokenizer.pad_token_id).long()
+
+
         pos += total_tokens_needed
         yield batch
 
@@ -566,7 +619,16 @@ def _num_tokens_in_shard(file: Path):
     num_tokens = int(header[2]) # number of tokens (claimed)
     return num_tokens
 
-def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenizer=None):
+def wind_data_generator(cfg, 
+                        train_bin_pattern, 
+                        step, 
+                        rank, 
+                        world_size, 
+                        tokenizer=None,
+                        untokenizer_gpt=None,
+                        use_ar_decoding: bool = False, 
+                        decoder_start_token_id: Optional[int] = None,
+                        pad_token_id: Optional[int] = None,):
     """
     Wind the data generator to the correct position for resuming training.
     
@@ -648,6 +710,9 @@ def wind_data_generator(cfg, train_bin_pattern, step, rank, world_size, tokenize
         world_size=world_size,
         sequence_length=max_seq_len,
         tokenizer=tokenizer,
+        untokenizer_gpt=untokenizer_gpt,
+        decoder_start_token_id=decoder_start_token_id,
+        pad_token_id=pad_token_id,
         start_file_idx=file_idx,
         start_pos=start_pos
     )
@@ -685,7 +750,18 @@ def wind(ckpt_path, step=None):
     return data_generator(config.train_files, train_seq_len, start_file_idx=file_idx)
 
 
-def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: int, tokenizer=None, start_file_idx: int = 0, start_pos: int = 0):
+def get_dataloader_lvae_bin(
+                            cfg, 
+                            filename_pattern: str, 
+                            rank: int, 
+                            world_size: int,
+                            tokenizer=None,
+                            untokenizer_gpt=None,
+                            use_ar_decoding: bool = False,
+                            decoder_start_token_id: Optional[int] = None, 
+                            pad_token_id: Optional[int] = None,
+                            start_file_idx: int = 0, 
+                            start_pos: int = 0):
     """
     Creates a data generator for LVAE training using .bin files.
     
@@ -718,11 +794,26 @@ def get_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: i
         world_size=world_size,
         sequence_length=sequence_length,
         tokenizer=tokenizer,
+        untokenizer_gpt=untokenizer_gpt,
+        use_ar_decoding=use_ar_decoding,
+        decoder_start_token_id=decoder_start_token_id,
+        pad_token_id=pad_token_id,
         start_file_idx=start_file_idx,
         start_pos=start_pos
     )
 
-def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_size: int, tokenizer=None, start_file_idx: int = 0, start_pos: int = 0):
+def get_val_dataloader_lvae_bin(
+                                cfg, 
+                                filename_pattern: str, 
+                                rank: int, 
+                                world_size: int,
+                                tokenizer=None, 
+                                untokenizer_gpt=None,
+                                use_ar_decoding: bool = False,
+                                decoder_start_token_id: Optional[int] = None,
+                                pad_token_id: Optional[int] = None,
+                                start_file_idx: int = 0, 
+                                start_pos: int = 0):
     """
     Creates a validation data generator for LVAE training using .bin files.
     
@@ -755,6 +846,10 @@ def get_val_dataloader_lvae_bin(cfg, filename_pattern: str, rank: int, world_siz
         world_size=world_size,
         sequence_length=sequence_length,
         tokenizer=tokenizer,
+        untokenizer_gpt=untokenizer_gpt,
+        use_ar_decoding = use_ar_decoding, 
+        decoder_start_token_id = decoder_start_token_id, 
+        pad_token_id = pad_token_id,
         start_file_idx=start_file_idx,
         start_pos=start_pos
     )
