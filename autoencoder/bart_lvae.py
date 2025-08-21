@@ -77,8 +77,8 @@ class LatentVAEModel(BartForConditionalGeneration):
         # We still need to define them here for type-hinting and IDE support.
         self.vae_encoder: Optional[nn.Module] = None
 
-        self.proj_in: Optional[nn.Module] = None
-        self.proj_out: Optional[nn.Module] = None
+        self.proj_in_l: Optional[nn.Module] = None
+        self.proj_out_l: Optional[nn.Module] = None
 
         self.vae_post_layernorm: Optional[nn.LayerNorm] = None
         self.latent_dim: Optional[int] = None
@@ -130,8 +130,8 @@ class LatentVAEModel(BartForConditionalGeneration):
         )
 
         # --- NEW: Attach projection layers directly to the vae module ---
-        model.proj_in = nn.Linear(bart_dim, vae_model_dim)
-        model.proj_out = nn.Linear(vae_model_dim, bart_dim)
+        model.proj_in_l = nn.Linear(bart_dim, vae_model_dim)
+        model.proj_out_l = nn.Linear(vae_model_dim, bart_dim)
 
         return model
 
@@ -157,7 +157,7 @@ class LatentVAEModel(BartForConditionalGeneration):
         This is for the diffusion training pipeline with precomputed BART embeddings.
         """
         embeddings = embeddings.to(self.dtype)
-        projected_embeddings = self.proj_in(embeddings)
+        projected_embeddings = self.proj_in_l(embeddings)
         moments = self.vae.encode(projected_embeddings)
         return self.vae.reparameterize(*moments, only_mu=True)
 
@@ -167,7 +167,7 @@ class LatentVAEModel(BartForConditionalGeneration):
         
         # --- UPDATED: Use new proj_up path ---
         decoded_from_vae = self.vae.decode(latents)
-        projected_output = self.proj_out(decoded_from_vae)
+        projected_output = self.proj_out_l(decoded_from_vae)
 
         encoder_outputs = BaseModelOutput(last_hidden_state=projected_output)
 
@@ -192,10 +192,10 @@ class LatentVAEModel(BartForConditionalGeneration):
         bart_embeddings = bart_encoder_outputs.last_hidden_state
 
         # --- UPDATED: Use new proj_down/proj_up path ---
-        projected_embeddings = self.proj_in(bart_embeddings)
+        projected_embeddings = self.proj_in_l(bart_embeddings)
         recon_embeddings, mu, log_var = self.vae(projected_embeddings)
         # Project back up to BART dimension for the decoder
-        final_recon_embeddings = self.proj_out(recon_embeddings)
+        final_recon_embeddings = self.proj_out_l(recon_embeddings)
         
         # Calculate VAE loss in the projected space
         vae_loss_dict = self.vae.cont_loss_func(final_recon_embeddings, bart_embeddings, mu, log_var)
@@ -215,7 +215,7 @@ class LatentVAEModel(BartForConditionalGeneration):
         Takes pre-computed BART latents, runs them through the VAE, and returns the VAE's output and loss.
         """
         # --- UPDATED: Use new proj_down path ---
-        projected_latents = self.proj_in(precomputed_latents)
+        projected_latents = self.proj_in_l(precomputed_latents)
         recon_latents, mu, log_var = self.vae(projected_latents)
         # Loss is calculated in the projected space
         vae_loss_dict = self.vae.cont_loss_func(recon_latents, projected_latents, mu, log_var)
@@ -226,7 +226,7 @@ class LatentVAEModel(BartForConditionalGeneration):
         Computes the reconstruction loss between original BART latents and the VAE's output.
         The loss is now computed in the VAE's projected space.
         """
-        return F.mse_loss(vae_output, self.proj_out(original_latents)) # oh... why do we do this in the VAE's latent space, comp less expensive?
+        return F.mse_loss(vae_output, self.proj_out_l(original_latents)) # oh... why do we do this in the VAE's latent space, comp less expensive?
 
     def forward(
         self,
@@ -253,7 +253,7 @@ class LatentVAEModel(BartForConditionalGeneration):
                 raise ValueError("`input_latents` was provided, but the model was not initialized with `use_precomputed_latents=True`.")
             
             # --- UPDATED: Use new projection paths and loss calculation ---
-            projected_embeddings = self.proj_in(input_latents)
+            projected_embeddings = self.proj_in_l(input_latents)
             recon_embeddings, mu, log_var = self.vae(projected_embeddings)
 
             # Calculate VAE loss in the projected space
@@ -262,7 +262,7 @@ class LatentVAEModel(BartForConditionalGeneration):
             kld_loss = vae_loss_dict['kld_loss']
             
             # For generation, project back up and wrap in BaseModelOutput
-            reconstructed_bart_embeddings = self.proj_out(recon_embeddings)
+            reconstructed_bart_embeddings = self.proj_out_l(recon_embeddings)
             enc_outs = BaseModelOutput(last_hidden_state=reconstructed_bart_embeddings)
             
             

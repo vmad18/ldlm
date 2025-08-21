@@ -239,12 +239,11 @@ class AutoEncodingBlock(nn.Module):
         self.ffn2_ln = nn.LayerNorm(cfg.latent_dim) 
 
     def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        latents = latents + self.attn(x, latents, mask)
-        
         x = x + self.attn_toks(self.attn_toks_ln(x))
-        x = x + self.ffn1(self.ffn1_ln(x)) 
-        latents = latents + self.ffn2(self.ffn2_ln(latents)) 
+        x = x + self.ffn1(self.ffn1_ln(x))
 
+        latents = latents + self.attn(x, latents, mask) # cross attend latents
+        latents = latents + self.ffn2(self.ffn2_ln(latents)) # channel mix latents
         return x, latents
 
 class PerceiverResampler(nn.Module): 

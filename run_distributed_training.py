@@ -22,7 +22,7 @@ from autoencoder.train_distributed import main
 
 print(f"Importing complete in run_distributed_training.py", flush=True)
 
-@hydra.main(version_base=None, config_path="conf", config_name="train_lvae_dist")
+@hydra.main(version_base=None, config_path="conf", config_name="train_lvae_bb_dist_llnl_multilat")
 def main_script(cfg: DictConfig) -> None:
     """Main script entry point with Hydra configuration"""
     

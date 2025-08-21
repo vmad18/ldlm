@@ -639,8 +639,14 @@ def main(cfg: DictConfig):
 
     for param in model.parameters():
         dist.broadcast(param.detach(), 0)
-    
+    """
+        self.proj_in: Optional[nn.Module] = None
+        self.proj_out: Optional[nn.Module] = None
+
+    """
     embed_params, head_params, pos_embed_params, hidden_matrix_params, scalar_params = [], [], [], [], []
+    proj_in_params, proj_out_params = [], []
+
     # Carefully separate parameters to avoid size mismatches
     for n, p in model.named_parameters():
         # TODO: identify what BART uses for embed and dembed layer names for lvae_bb
@@ -653,6 +659,10 @@ def main(cfg: DictConfig):
         elif "embed" in n and p.requires_grad:
             embed_params.append(p)
             # print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
+        elif "proj_in_l" in n and p.requires_grad:
+            proj_in_params.append(p)
+        elif "proj_out_l" in n and p.requires_grad:
+            proj_out_params.append(p)
         elif p.ndim >= 2 and p.requires_grad:
             hidden_matrix_params.append(p)
             # print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
@@ -680,7 +690,7 @@ def main(cfg: DictConfig):
         summarize_requires_grad("scalar_params",        scalar_params)
 
     # optimizer_adam = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1) 
-    optimizer_adam = DistAdam(scalar_params + head_params + embed_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+    optimizer_adam = DistAdam(scalar_params + head_params + embed_params + proj_in_params + proj_out_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
     optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
     
     # Set initial_lr for proper learning rate scheduling after resume
