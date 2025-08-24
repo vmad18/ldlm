@@ -563,14 +563,15 @@ def distributed_data_generator(
 
         text = untokenizer_gpt.batch_decode(
             batch_tokens.tolist(),  # convert tensor -> list of lists
-            skip_special_tokens=False
+            skip_special_tokens=True
         )
 
         # 2. Retokenize with new tokenizer (limit length 128)
         inputs_dict = tokenizer(
             text,
-            padding=True,
+            # padding=True,
             truncation=True,
+            padding="max_length",
             max_length=128,
             return_tensors="pt"
         )
@@ -579,7 +580,7 @@ def distributed_data_generator(
         inputs = inputs_dict["input_ids"].to(device="cuda", non_blocking=True)
 
         # Create attention mask (all ones since we're not using padding in this format)
-        attention_mask = torch.ones_like(inputs, dtype=torch.int64) # inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64)
+        attention_mask =  inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64) # inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64)
 
         # Create batch dict in the format expected by the model
         batch = {

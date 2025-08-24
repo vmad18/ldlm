@@ -228,22 +228,22 @@ class AutoEncodingBlock(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__() 
 
-        self.attn_toks = MultiHeadAttn(cfg)
+        # self.attn_toks = MultiHeadAttn(cfg)
         self.attn = PerceiverAttention(cfg) 
 
         self.ffn1 = FeedForward(cfg, cfg.dim)
         self.ffn2 = FeedForward(cfg, cfg.latent_dim)
 
-        self.attn_toks_ln = nn.LayerNorm(cfg.dim)
+        # self.attn_toks_ln = nn.LayerNorm(cfg.dim)
         self.ffn1_ln = nn.LayerNorm(cfg.dim)
         self.ffn2_ln = nn.LayerNorm(cfg.latent_dim) 
 
     def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = x + self.attn_toks(self.attn_toks_ln(x))
-        x = x + self.ffn1(self.ffn1_ln(x))
-
         latents = latents + self.attn(x, latents, mask) # cross attend latents
         latents = latents + self.ffn2(self.ffn2_ln(latents)) # channel mix latents
+
+        # x = x + self.attn_toks(self.attn_toks_ln(x))
+        x = x + self.ffn1(self.ffn1_ln(x))
         return x, latents
 
 class PerceiverResampler(nn.Module): 
@@ -251,7 +251,7 @@ class PerceiverResampler(nn.Module):
     def __init__(self, cfg: Config) -> None:
         super().__init__()
 
-        # self.pos_embed = AbsolutePositionalEmbedding(cfg, cfg.dim)
+        self.pos_embed = AbsolutePositionalEmbedding(cfg, cfg.dim)
 
         self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim))) 
         nn.init.normal_(self.latents, std = 0.02) 
@@ -267,7 +267,7 @@ class PerceiverResampler(nn.Module):
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, *_ = x.shape
 
-        # x = x  + self.pos_embed(x)
+        x = x  + self.pos_embed(x)
         
         latents = repeat(self.latents, "n d -> b n d", b = x.shape[0])
 

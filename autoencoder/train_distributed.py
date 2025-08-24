@@ -402,21 +402,35 @@ def main(cfg: DictConfig):
     
     # Setup logging
     logfile = None
+    # Determine training mode
+    training_mode = getattr(cfg, 'training_mode', 'lvae')
+
     # All ranks need to know the results folder for saving per-rank optimizer states
     cfg_hash = hashlib.md5(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()
-    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / cfg_hash
+    
+    # get the current time
+    now_time = datetime.now() 
+    time_path = now_time.strftime("%Y-%m-%d_%H-%M-%S")
+
+    # global batch size 
+    gbz = cfg.grad_accumulate * cfg.train_bs * world_size 
+
+    if training_mode in ("lvae", "lvae_bart", "lvae_t5"):
+        run_name = f"{training_mode}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}-n_lats-{cfg.model.num_latents}-lat_dim-{cfg.model.latent_dim}-kld_beta-{cfg.kld_weight}"
+    else:
+        run_name = f"{training_mode}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}-n_lats-{cfg.model.num_latents}-lat_dim-{cfg.model.latent_dim}"
+    
+    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / run_name / cfg_hash / time_path
     
     # Check if we should auto-resume from existing checkpoint
     # TODO: remove the False and ...    
-    if False and cfg.resume_from is None and results_folder.exists():
+    if cfg.resume_from is None and results_folder.exists():
         potential_checkpoint = results_folder / "model_best.pt"
         if potential_checkpoint.exists():
             cfg.resume_from = str(results_folder)
             print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
 
 
-    # Determine training mode
-    training_mode = getattr(cfg, 'training_mode', 'lvae')
     print0(f"Training mode: {training_mode}", logfile, console=True)
     if master_process:
         
@@ -659,10 +673,10 @@ def main(cfg: DictConfig):
         elif "embed" in n and p.requires_grad:
             embed_params.append(p)
             # print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
-        elif "proj_in_l" in n and p.requires_grad:
-            proj_in_params.append(p)
-        elif "proj_out_l" in n and p.requires_grad:
-            proj_out_params.append(p)
+        # elif "proj_in_l" in n and p.requires_grad:
+        #     proj_in_params.append(p)
+        # elif "proj_out_l" in n and p.requires_grad:
+        #     proj_out_params.append(p)
         elif p.ndim >= 2 and p.requires_grad:
             hidden_matrix_params.append(p)
             # print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
@@ -690,16 +704,22 @@ def main(cfg: DictConfig):
         summarize_requires_grad("scalar_params",        scalar_params)
 
     # optimizer_adam = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1) 
-    optimizer_adam = DistAdam(scalar_params + head_params + embed_params + proj_in_params + proj_out_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-    optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
+    #  + pos_embed_params + hidden_matrix_params + scalar_params
+    # optimizer_adam = DistAdam(embed_params + head_params + scalar_params, lr=cfg.learning_rate, betas=(0.9, 0.95), eps=1e-10, weight_decay=0.1)
+    # optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.1)
     
+    optimizer_adam = DistAdam(scalar_params + head_params + embed_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+    optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
+
+    #  + proj_in_params + proj_out_params
+
     # Set initial_lr for proper learning rate scheduling after resume
     for group in optimizer_adam.param_groups:
         group['initial_lr'] = cfg.learning_rate
     for group in optimizer_muon.param_groups:
         group['initial_lr'] = cfg.muon_lr
     
-    optimizers = [optimizer_adam, optimizer_muon]
+    optimizers = [optimizer_adam, optimizer_muon] #, optimizer_muon
     
     if cfg.resume_from is not None:
         step = data['step']
@@ -711,7 +731,7 @@ def main(cfg: DictConfig):
         
         optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
         
-        if cfg.training_mode == 'lvae' or cfg.training_mode == 'lvae_bart' or cfg.training_mode == 'lvae_t5':
+        if cfg.training_mode in ('lvae', 'lvae_bart', 'lvae_t5'):
             optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
             optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
         elif cfg.training_mode == 'cfm':
