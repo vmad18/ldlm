@@ -28,30 +28,22 @@ QOS = "pbatch"
 
 # BANK = "guests"
 BANK = "effml"
+# BANK = "guard"
 
 TIME_LIMIT = 29
-# TIME_LIMIT = 59
-# TIME_LIMIT = 1440
 
 REPETITIONS = 1
 DEPENDENCY = None
-# REPETITIONS = 3
-# DEPENDENCY = "afterany"
-# DEPENDENCY = "singleton"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
 # BASE_RUN_NAME = f"debug"
-# BASE_RUN_NAME = f"compile_series"
-# BASE_RUN_NAME = f"scale_series"
-# BASE_RUN_NAME = f"scale_series_mbsz"
-BASE_RUN_NAME = f"scale_series_nodes"
-# BASE_RUN_NAME = f"prod"
+# BASE_RUN_NAME = f"scale_series_nodes_vs_mbsz"
+BASE_RUN_NAME = f"scale_series_max_test"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
 
-# INVOCATION_PREAMBLE = "export UV_CACHE_DIR=$VASTUSER/.cache/uv && uv run --index-strategy=unsafe-best-match"
 INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 
 # INDUCTOR_CACHE=None
@@ -66,19 +58,12 @@ MAX_STEPS = 100
 
 TOK_WBSZ_1M = 8192 * 128
 TOK_WBSZ_4M = TOK_WBSZ_1M * 4
+MAX_NODES = 32
 
 SEQ_LEN = 128
 
-# MAX_NODES = 32
-# MAX_ACCUM = None
-
-# MAX_NODES = 1
-# MAX_NODES = 2
-MAX_NODES = 4
-MAX_ACCUM = 1
-
-
 GPN = 4
+
 
 MAX_MEM = None
 # MAX_MEM = 0.9
@@ -93,162 +78,152 @@ if COMPILE_SERIES:
     ), "Compile series warmup workflow requires singleton dependency"
 
 # Cfgs
-# gpn = gpus per node
-# arg list is:
-# script, cfg name, nodes, gpn, mbsz, accum, seq_len, lr ...
-# exp_list = [
-# ["run_distributed_training.py", "train_lvae_dist_llnl_multilat", 16, 4, 256, 1, 128, 1e-4, "True", None],
-# ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 16, 4, 256, 1, 128, 1e-4, "True", None],
-# switching to single latents with smaller internal dims
-# ]
-
 ashwinee_cfgs = {
+    "orig_single_lat": {
+        "reference": {
+            "d_model": 768,
+            "latent_dim": 2048,
+            "layers_p": 12,
+            "max_mbsz": 256,
+            "max_node_ct": 8,
+            "accum_for_tgt": 1, 
+            "tgt_tok_wbsz": TOK_WBSZ_1M,
+        },
+    },
     "extreme_examples_1b": {
         "widest_model": {
             "d_model": 5120,
             "latent_dim": 384,
             "layers_p": 2,
-            "params_millions": 992.02,
-            "max_mbsz": 256,
+            "max_mbsz": 128,
+            "max_node_ct": 8,
+            "accum_for_tgt": 2,
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
         "narrowest_model": {
             "d_model": 256,
             "latent_dim": 2176,
             "layers_p": 20,
-            "params_millions": 993.67,
-            "max_mbsz": 256,
+            "max_mbsz": 128,
+            "max_node_ct": 16,
+            "accum_for_tgt": 1,
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
         "largest_latent": {
             "d_model": 256,
             "latent_dim": 7552,
             "layers_p": 2,
-            "params_millions": 1003.84,
             "max_mbsz": 512,
+            "max_node_ct": 2,
+            "accum_for_tgt": 2,
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
         "smallest_latent": {
             "d_model": 2048,
             "latent_dim": 256,
             "layers_p": 18,
-            "params_millions": 993.42,
-            "max_mbsz": 128,
+            "max_mbsz": 64,
+            "max_node_ct": 32,
+            "accum_for_tgt": 1,
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
         "deepest_model": {
             "d_model": 384,
             "latent_dim": 1920,
             "layers_p": 24,
-            "params_millions": 1002.09,
-            "max_mbsz": 256,
+            "max_mbsz": 128,
+            "max_node_ct": 16,
+            "accum_for_tgt": 1,
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
     },
-    "extreme_examples_2b": {
-        "widest_model": {
-            "d_model": 8192,
-            "latent_dim": 5376,
-            "layers_p": 2,
-            "params_millions": 2487.57,
-            "max_mbsz": 64,
-            "tgt_tok_wbsz": TOK_WBSZ_4M,
-        },
-        # # seem like could be too big to run even at the min bsz
-        # "largest_latent": {
-        #     "d_model": 1280,
-        #     "latent_dim": 8192,
-        #     "layers_p": 4,
-        #     "params_millions": 2486.47,
-        #     "max_mbsz": None,
-        #     "tgt_tok_wbsz": TOK_WBSZ_4M,
-        # },
-        "smallest_latent": {
-            "d_model": 3328,
-            "latent_dim": 256,
-            "layers_p": 21,
-            "params_millions": 2521.47,
-            "max_mbsz": 8,
-            "tgt_tok_wbsz": TOK_WBSZ_4M,
-        },
-        "deepest_model": {
-            "d_model": 256,
-            "latent_dim": 3328,
-            "layers_p": 24,
-            "params_millions": 2517.85,
-            "max_mbsz": 32,
-            "tgt_tok_wbsz": TOK_WBSZ_4M,
-        },
-        "shallowest_model": {
-            "d_model": 6400,
-            "latent_dim": 8192,
-            "layers_p": 2,
-            "params_millions": 2505.12,
-            "max_mbsz": 32,
-            "tgt_tok_wbsz": TOK_WBSZ_4M,
-        },
-    },
+    # "extreme_examples_2b": {
+    #     "widest_model": {
+    #         "d_model": 8192,
+    #         "latent_dim": 5376,
+    #         "layers_p": 2,
+    #         "params_millions": 2487.57,
+    #         "max_mbsz": 64,
+    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
+    #     },
+    #     # # seem like could be too big to run even at the min bsz
+    #     # "largest_latent": {
+    #     #     "d_model": 1280,
+    #     #     "latent_dim": 8192,
+    #     #     "layers_p": 4,
+    #     #     "params_millions": 2486.47,
+    #     #     "max_mbsz": None,
+    #     #     "tgt_tok_wbsz": TOK_WBSZ_4M,
+    #     # },
+    #     "smallest_latent": {
+    #         "d_model": 3328,
+    #         "latent_dim": 256,
+    #         "layers_p": 21,
+    #         "params_millions": 2521.47,
+    #         "max_mbsz": 8,
+    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
+    #     },
+    #     "deepest_model": {
+    #         "d_model": 256,
+    #         "latent_dim": 3328,
+    #         "layers_p": 24,
+    #         "params_millions": 2517.85,
+    #         "max_mbsz": 32,
+    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
+    #     },
+    #     "shallowest_model": {
+    #         "d_model": 6400,
+    #         "latent_dim": 8192,
+    #         "layers_p": 2,
+    #         "params_millions": 2505.12,
+    #         "max_mbsz": 32,
+    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
+    #     },
+    # },
 }
 
 exp_list = [
-    # ["run_distributed_training.py", "train_lvae_dist_llnl", 1, 4, 1, 128, 1e-4, 1e-4, "True", 1],
     ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 1e-4, "True", 1],
 ]
 
 # sweep the model shapes
 hparam_list = []
-for MAX_NODES in [1,2,4,8,16,32]:
-    for cfg_name, models in ashwinee_cfgs.items():
-        for model_name, model_cfg in models.items():
-            d_model = model_cfg["d_model"]
-            latent_dim = model_cfg["latent_dim"]
-            layers_p = model_cfg["layers_p"]
-            hparams = [
-                    d_model,
-                    latent_dim,
-                    layers_p,
-                ]
-            # # compute the multiplier of the mbsz and seq_len that would be required to hit the tgt tok wbsz
-            # if model_cfg.get("max_mbsz") is not None:
-            #     tgt_tok_wbsz = model_cfg["tgt_tok_wbsz"]
-            #     # compute the multiplier of the mbsz and seq_len that would be required to hit the tgt tok wbsz
-            #     mbsz_node_mult = int(tgt_tok_wbsz / (SEQ_LEN * GPN * model_cfg["max_mbsz"]))
-            #     accum = 1
-            #     if mbsz_node_mult > MAX_NODES:
-            #         # if the multiplier is larger than the max nodes, we need to accumulate
-            #         accum = int(mbsz_node_mult / MAX_NODES)
-            #         mbsz_node_mult = int(mbsz_node_mult / accum)
-            #     nodes = mbsz_node_mult
-            #     # just for testing
-            #     if MAX_ACCUM is not None and accum > MAX_ACCUM:
-            #         accum = MAX_ACCUM
-            # else:
-            #     continue
-            nodes = MAX_NODES
-            accum = MAX_ACCUM
-            
-            # add the hparams
-            hparams += [
-                nodes,  # nodes
-                GPN,  # gpn 
-                model_cfg["max_mbsz"],  # mbsz
-                accum,
+# for MAX_NODES in [1,2,4,8,16,32]:
+for cfg_name, models in ashwinee_cfgs.items():
+    for model_name, model_cfg in models.items():
+        print(model_cfg)
+        d_model = model_cfg["d_model"]
+        latent_dim = model_cfg["latent_dim"]
+        layers_p = model_cfg["layers_p"]
+        hparams = [
+                d_model,
+                latent_dim,
+                layers_p,
             ]
+        # compute the multiplier of the mbsz and seq_len that would be required to hit the tgt tok wbsz
+        
+        tgt_tok_wbsz = model_cfg["tgt_tok_wbsz"]
+        specd_max_mbsz = model_cfg["max_mbsz"]
+        specd_accum = model_cfg["accum_for_tgt"]
+        specd_max_node_ct = model_cfg["max_node_ct"]
 
-            hparam_list.append(hparams)
+        assert specd_max_node_ct * GPN * specd_max_mbsz * specd_accum * SEQ_LEN == tgt_tok_wbsz
+        assert specd_max_node_ct <= MAX_NODES
+        
+        # nodes = MAX_NODES
+        # accum = MAX_ACCUM
+        
+        # add the hparams
+        hparams += [
+            specd_max_node_ct,
+            GPN,
+            specd_max_mbsz,
+            specd_accum,
+        ]
+
+        hparam_list.append(hparams)
 
 exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in exp_list]))
-
-# then we will sweep the mbsz, and for the costliest model, use this to set the max wbsz that 8N or 16N allows
-# then use only the node ct required for each less costly one
-# 1Bs
-# hparam_list = [1,2,4,8,16,32,64,128][::-1]
-# hparam_list = [256,512][::-1]
-# 2Bs
-# hparam_list = [1,2,4,8,16][::-1]
-# hparam_list = [32,64,128,256,512][::-1]
-
-# exp_list = list(chain(*[[exp + [hparam] for hparam in hparam_list] for exp in exp_list]))
 
 final_exp_list = exp_list
 for exp in final_exp_list:
@@ -262,14 +237,9 @@ for exp in final_exp_list:
     (
         script,
         cfg_name,
-        # nodes,
-        # gpn,
-        # accum,
-        # seq_len,
         kld,
         lr,
         compile_model,
-        # lvae_path,
         num_lat,
         d_model,
         lat_dim,
@@ -278,6 +248,7 @@ for exp in final_exp_list:
         gpn,
         mbsz,
         accum,
+        # lvae_path, # will be auto selecting from final runname
     ) = exp
 
     gpus = nodes * GPN
@@ -329,10 +300,6 @@ for exp in final_exp_list:
     compile_str = "compiled" if compile_model else "uncompiled"
     cli_args += f" compile_model={compile_model}"
 
-    # # add the lvae path
-    # if lvae_path is not None:
-    #     cli_args += f" model.lvae_model_path={lvae_path}"
-
     if MAX_MEM is not None:
         cli_args += f" per_process_vram_ratio={MAX_MEM}"
 
@@ -353,6 +320,10 @@ for exp in final_exp_list:
             # f"{BASE_RUN_NAME}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
             f"{BASE_RUN_NAME}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
         )
+
+    # # add the lvae path
+    # if lvae_path is not None:
+    #     cli_args += f" model.lvae_model_path={lvae_path}"
     
     # add custom name for wandb
     cli_args += f" wandb_name={run_name}"
