@@ -261,8 +261,7 @@ class DiTModel(nn.Module):
                  self_condition = False,
                  class_unconditional_prob = 1, 
                  num_classes = 0,
-                 seq2seq = False, 
-                 ):
+                 seq2seq = False,) -> None:
         super().__init__()
         self.cfg = cfg
         
@@ -285,24 +284,23 @@ class DiTModel(nn.Module):
 
     # TODO: change signature to handle ctx tensor: ctx: torch.Tensor
     # y_ctx: torch.Tensor
-    def forward(self, 
+    def forward(self,
                 x: torch.Tensor, 
                 t: torch.Tensor, 
-                cond_ctx: torch.Tensor,
-                force_unconditional: bool = False
-                ) -> torch.Tensor:
+                cond_ctx: Optional[torch.Tensor] = None,
+                force_unconditional: bool = False) -> torch.Tensor:
+        bsz, *_ = x.shape
 
         t = t.view(-1)         
         x = self.proj_in(x)
-
-        if force_unconditional:
-            bsz, *_ = x.shape 
-            cond_ctx = repeat(self.null_context.to(x.device), "1 l d -> b l d", b = bsz).to(x.device)
+        if cond_ctx is None:
+            cond_ctx = repeat(self.null_context.to(x.device), "1 l d -> b l d", b = bsz)
+        elif force_unconditional:
+            cond_ctx = repeat(self.null_context.to(x.device), "1 l d -> b l d", b = bsz)
         elif (self.training and self.class_unconditional_prob > 0): 
-            bsz, *_ = x.shape 
             uncond_mask = torch.rand((bsz, 1, 1)) <= self.class_unconditional_prob
             if uncond_mask.any():
-                null_ctx = repeat(self.null_context.to(x.device), "1 l d -> b l d", b = bsz).to(x.device)
+                null_ctx = repeat(self.null_context.to(x.device), "1 l d -> b l d", b = bsz)
                 cond_ctx = torch.where(uncond_mask.to(x.device), null_ctx, cond_ctx)
 
         # init_ctx = self.init_ctx_proj(init_ctx)

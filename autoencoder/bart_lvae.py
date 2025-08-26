@@ -137,21 +137,21 @@ class LatentVAEModel(BartForConditionalGeneration):
 
     def get_bart_encodings(self, 
                            input_ids, 
-                           attn_mask=None):
+                           attention_mask: Optional[torch.Tensor] = None):
 
         # if self.encoder is None:
         #     raise ValueError("Cannot get BART encodings when the model is in pre-computed latent mode (encoder is deleted).")
         
         with torch.no_grad():
             # Ensure attention mask is boolean
-            if attn_mask is not None and attn_mask.dtype != torch.bool:
-                attn_mask = attn_mask.bool()
+            if attention_mask is not None and attention_mask.dtype != torch.bool:
+                attention_mask = attention_mask.bool()
 
             # The base BART's encoder returns a BaseModelOutput object
-            encoder_outputs = self.get_encoder()(input_ids=input_ids, attention_mask=attn_mask)
+            encoder_outputs = self.get_encoder()(input_ids=input_ids, attention_mask=attention_mask)
         return encoder_outputs # This is an object with a .last_hidden_state attribute
 
-    def latents_from_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+    def latents_from_embeddings(self, embeddings: torch.Tensor, mu_only: bool = True) -> torch.Tensor:
         """
         Takes BART embeddings and returns VAE latents (mu).
         This is for the diffusion training pipeline with precomputed BART embeddings.
@@ -159,7 +159,22 @@ class LatentVAEModel(BartForConditionalGeneration):
         embeddings = embeddings.to(self.dtype)
         projected_embeddings = self.proj_in_l(embeddings)
         moments = self.vae.encode(projected_embeddings)
-        return self.vae.reparameterize(*moments, only_mu=True)
+        return self.vae.reparameterize(*moments, mu_only = mu_only)
+
+    def get_latents(self, 
+                    input_ids: torch.Tensor, 
+                    attention_mask: Optional[torch.Tensor] = None, 
+                    mu_only: bool = True) -> torch.Tensor:
+        """
+        Takes BART embeddings and returns VAE latents (mu).
+        This is for the diffusion training pipeline with precomputed BART embeddings.
+        """
+        bart_encoder_outputs = self.get_bart_encodings(input_ids, attention_mask=attention_mask)
+        bart_embeddings = bart_encoder_outputs.last_hidden_state
+        projected_embeddings = self.proj_in_l(bart_embeddings)
+        
+        moments = self.vae.encode(projected_embeddings)
+        return self.vae.reparameterize(*moments, mu_only = mu_only)
 
     @torch.no_grad()
     def decode_latent(self, latents, max_length=512, **kwargs):
@@ -188,12 +203,13 @@ class LatentVAEModel(BartForConditionalGeneration):
                    input_ids: torch.Tensor, 
                    attention_mask: Optional[torch.Tensor] = None) -> Tuple[Any, torch.Tensor, torch.Tensor]:
         # Get BART's raw embeddings
-        bart_encoder_outputs = self.get_bart_encodings(input_ids, attn_mask=attention_mask)
+        bart_encoder_outputs = self.get_bart_encodings(input_ids, attention_mask=attention_mask)
         bart_embeddings = bart_encoder_outputs.last_hidden_state
 
         # --- UPDATED: Use new proj_down/proj_up path ---
         projected_embeddings = self.proj_in_l(bart_embeddings)
-        recon_embeddings, mu, log_var = self.vae(projected_embeddings)
+        # TODO: mayb remove this? mask = attention_mask
+        recon_embeddings, mu, log_var = self.vae(projected_embeddings, mask = attention_mask.bool()) # , mask = attention_mask
         # Project back up to BART dimension for the decoder
         final_recon_embeddings = self.proj_out_l(recon_embeddings)
         
@@ -287,7 +303,7 @@ class LatentVAEModel(BartForConditionalGeneration):
             encoder_outputs_from_vae, vae_loss, _ = self.autoencode(input_ids, attention_mask=attention_mask)
             
             # Pass the reconstructed embeddings to the BART decoder to calculate LM loss
-            # 
+            
             lm_loss = super().forward(labels=labels, encoder_outputs=encoder_outputs_from_vae, **kwargs).loss
 
             return {

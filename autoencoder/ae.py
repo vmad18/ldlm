@@ -315,25 +315,36 @@ class VariationalAutoEncoder(nn.Module):
         """Decodes latents back into the embedding space."""
         return self.decoder(latents)
 
-    def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+    def discrete_loss_func(self, 
+                           recon_x: torch.Tensor, 
+                           x: torch.Tensor, 
+                           mu: torch.Tensor, 
+                           log_var: torch.Tensor) -> dict:
         recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
         kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
 
-    def cont_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+    def cont_loss_func(self, 
+                       recon_x: torch.Tensor,
+                       x: torch.Tensor, 
+                       mu: torch.Tensor, 
+                       log_var: torch.Tensor) -> dict:
         if recon_x.shape != x.shape:
             print(f"[VAE ERROR] Shape mismatch in loss calculation:")
             print(f"  --> recon_x shape: {recon_x.shape}")
             print(f"  --> x shape:       {x.shape}")
         recon_loss = F.mse_loss(recon_x, x, reduction='mean')
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
+        kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
     
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, 
+                x: torch.Tensor, 
+                mask: Optional[torch.Tensor] = None, 
+                mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
         z = self.reparameterize(mu, log_var, mu_only)
         recon_x = self.decode(z)
