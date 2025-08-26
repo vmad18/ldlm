@@ -25,9 +25,6 @@ compile_model: true
 resume_from: null
 results_folder: null
 
-# parallelization config
-fsdp: true
-
 # Data configuration
 train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
 val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
