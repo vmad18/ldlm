@@ -30,16 +30,20 @@ QOS = "pbatch"
 BANK = "effml"
 # BANK = "guard"
 
-TIME_LIMIT = 29
+# TIME_LIMIT = 29
+TIME_LIMIT = 1440
 
-REPETITIONS = 1
-DEPENDENCY = None
+# REPETITIONS = 1
+# DEPENDENCY = None
+REPETITIONS = 5
+DEPENDENCY = "afterany"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
 # BASE_RUN_NAME = f"debug"
 # BASE_RUN_NAME = f"scale_series_nodes_vs_mbsz"
-BASE_RUN_NAME = f"scale_series_max_test"
+# BASE_RUN_NAME = f"scale_series_max_test"
+BASE_RUN_NAME = f"prod_suite_1b"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
@@ -49,12 +53,12 @@ INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 # INDUCTOR_CACHE=None
 INDUCTOR_CACHE="/l/ssd/$USER"
 
-# MAX_STEPS = None
-# # TGT_TOKENS = 100e9
-# TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
+MAX_STEPS = None
+# TGT_TOKENS = 100e9
+TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
 
-TGT_TOKENS = None
-MAX_STEPS = 100
+# TGT_TOKENS = None
+# MAX_STEPS = 100
 
 TOK_WBSZ_1M = 8192 * 128
 TOK_WBSZ_4M = TOK_WBSZ_1M * 4
@@ -79,36 +83,36 @@ if COMPILE_SERIES:
 
 # Cfgs
 ashwinee_cfgs = {
-    # "orig_single_lat": {
-    #     "reference": {
-    #         "d_model": 768,
-    #         "latent_dim": 2048,
-    #         "layers_p": 12,
-    #         "max_mbsz": 256,
-    #         "max_node_ct": 8,
-    #         "accum_for_tgt": 1, 
-    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
-    #     },
-    # },
+    "orig_single_lat": {
+        "reference": {
+            "d_model": 768,
+            "latent_dim": 2048,
+            "layers_p": 12,
+            "max_mbsz": 256,
+            "max_node_ct": 8,
+            "accum_for_tgt": 1, 
+            "tgt_tok_wbsz": TOK_WBSZ_1M,
+        },
+    },
     "extreme_examples_1b": {
-        # "widest_model": {
-        #     "d_model": 5120,
-        #     "latent_dim": 384,
-        #     "layers_p": 2,
-        #     "max_mbsz": 128,
-        #     "max_node_ct": 8,
-        #     "accum_for_tgt": 2,
-        #     "tgt_tok_wbsz": TOK_WBSZ_1M,
-        # },
-        # "narrowest_model": {
-        #     "d_model": 256,
-        #     "latent_dim": 2176,
-        #     "layers_p": 20,
-        #     "max_mbsz": 128,
-        #     "max_node_ct": 16,
-        #     "accum_for_tgt": 1,
-        #     "tgt_tok_wbsz": TOK_WBSZ_1M,
-        # },
+        "widest_model": {
+            "d_model": 5120,
+            "latent_dim": 384,
+            "layers_p": 2,
+            "max_mbsz": 128,
+            "max_node_ct": 8,
+            "accum_for_tgt": 2,
+            "tgt_tok_wbsz": TOK_WBSZ_1M,
+        },
+        "narrowest_model": {
+            "d_model": 256,
+            "latent_dim": 2176,
+            "layers_p": 20,
+            "max_mbsz": 128,
+            "max_node_ct": 16,
+            "accum_for_tgt": 1,
+            "tgt_tok_wbsz": TOK_WBSZ_1M,
+        },
         "largest_latent": {
             "d_model": 256,
             "latent_dim": 7552,
@@ -118,24 +122,24 @@ ashwinee_cfgs = {
             "accum_for_tgt": 4,
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
-        # "smallest_latent": {
-        #     "d_model": 2048,
-        #     "latent_dim": 256,
-        #     "layers_p": 18,
-        #     "max_mbsz": 64,
-        #     "max_node_ct": 32,
-        #     "accum_for_tgt": 1,
-        #     "tgt_tok_wbsz": TOK_WBSZ_1M,
-        # },
-        # "deepest_model": {
-        #     "d_model": 384,
-        #     "latent_dim": 1920,
-        #     "layers_p": 24,
-        #     "max_mbsz": 128,
-        #     "max_node_ct": 16,
-        #     "accum_for_tgt": 1,
-        #     "tgt_tok_wbsz": TOK_WBSZ_1M,
-        # },
+        "smallest_latent": {
+            "d_model": 2048,
+            "latent_dim": 256,
+            "layers_p": 18,
+            "max_mbsz": 64,
+            "max_node_ct": 32,
+            "accum_for_tgt": 1,
+            "tgt_tok_wbsz": TOK_WBSZ_1M,
+        },
+        "deepest_model": {
+            "d_model": 384,
+            "latent_dim": 1920,
+            "layers_p": 24,
+            "max_mbsz": 128,
+            "max_node_ct": 16,
+            "accum_for_tgt": 1,
+            "tgt_tok_wbsz": TOK_WBSZ_1M,
+        },
     },
     # "extreme_examples_2b": {
     #     "widest_model": {
@@ -183,12 +187,11 @@ ashwinee_cfgs = {
 }
 
 exp_list = [
-    ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 1e-4, "True", 1],
+    ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-2, "True", 1],
 ]
 
 # sweep the model shapes
 hparam_list = []
-# for MAX_NODES in [1,2,4,8,16,32]:
 for cfg_name, models in ashwinee_cfgs.items():
     for model_name, model_cfg in models.items():
         print(model_cfg)
@@ -209,9 +212,6 @@ for cfg_name, models in ashwinee_cfgs.items():
 
         assert specd_max_node_ct * GPN * specd_max_mbsz * specd_accum * SEQ_LEN == tgt_tok_wbsz
         assert specd_max_node_ct <= MAX_NODES
-        
-        # nodes = MAX_NODES
-        # accum = MAX_ACCUM
         
         # add the hparams
         hparams += [
@@ -237,8 +237,9 @@ for exp in final_exp_list:
     (
         script,
         cfg_name,
-        kld,
         lr,
+        muon_lr,
+        kld,
         compile_model,
         num_lat,
         d_model,
@@ -263,8 +264,8 @@ for exp in final_exp_list:
     cli_args += f" --config-path conf --config-name {cfg_name}"
 
     # mod lr and kld
-    lr_name_str = f"lr{lr:.0e}-kl{kld:.0e}"
-    lr_cfg_string = f" learning_rate={lr} kld_weight={kld}"
+    lr_name_str = f"lr{lr:.0e}-mlr{muon_lr:.0e}-kl{kld:.0e}"
+    lr_cfg_string = f" learning_rate={lr} muon_lr={muon_lr} kld_weight={kld}"
     cli_args += lr_cfg_string
 
     # mod bsz and seq len
