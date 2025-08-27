@@ -187,7 +187,8 @@ ashwinee_cfgs = {
 }
 
 exp_list = [
-    ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-2, "True", 1],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-2, "True", 1],
+    ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-4, "True", 1],
 ]
 
 # sweep the model shapes
