@@ -43,7 +43,8 @@ BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 # BASE_RUN_NAME = f"debug"
 # BASE_RUN_NAME = f"scale_series_nodes_vs_mbsz"
 # BASE_RUN_NAME = f"scale_series_max_test"
-BASE_RUN_NAME = f"prod_suite_1b"
+# BASE_RUN_NAME = f"prod_suite_1b"
+BASE_RUN_NAME = f"og_1b_hp_sweep"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
@@ -94,53 +95,53 @@ ashwinee_cfgs = {
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
     },
-    "extreme_examples_1b": {
-        "widest_model": {
-            "d_model": 5120,
-            "latent_dim": 384,
-            "layers_p": 2,
-            "max_mbsz": 128,
-            "max_node_ct": 8,
-            "accum_for_tgt": 2,
-            "tgt_tok_wbsz": TOK_WBSZ_1M,
-        },
-        "narrowest_model": {
-            "d_model": 256,
-            "latent_dim": 2176,
-            "layers_p": 20,
-            "max_mbsz": 128,
-            "max_node_ct": 16,
-            "accum_for_tgt": 1,
-            "tgt_tok_wbsz": TOK_WBSZ_1M,
-        },
-        "largest_latent": {
-            "d_model": 256,
-            "latent_dim": 7552,
-            "layers_p": 2,
-            "max_mbsz": 512,
-            "max_node_ct": 1,
-            "accum_for_tgt": 4,
-            "tgt_tok_wbsz": TOK_WBSZ_1M,
-        },
-        "smallest_latent": {
-            "d_model": 2048,
-            "latent_dim": 256,
-            "layers_p": 18,
-            "max_mbsz": 64,
-            "max_node_ct": 32,
-            "accum_for_tgt": 1,
-            "tgt_tok_wbsz": TOK_WBSZ_1M,
-        },
-        "deepest_model": {
-            "d_model": 384,
-            "latent_dim": 1920,
-            "layers_p": 24,
-            "max_mbsz": 128,
-            "max_node_ct": 16,
-            "accum_for_tgt": 1,
-            "tgt_tok_wbsz": TOK_WBSZ_1M,
-        },
-    },
+    # "extreme_examples_1b": {
+    #     "widest_model": {
+    #         "d_model": 5120,
+    #         "latent_dim": 384,
+    #         "layers_p": 2,
+    #         "max_mbsz": 128,
+    #         "max_node_ct": 8,
+    #         "accum_for_tgt": 2,
+    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
+    #     },
+    #     "narrowest_model": {
+    #         "d_model": 256,
+    #         "latent_dim": 2176,
+    #         "layers_p": 20,
+    #         "max_mbsz": 128,
+    #         "max_node_ct": 16,
+    #         "accum_for_tgt": 1,
+    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
+    #     },
+    #     "largest_latent": {
+    #         "d_model": 256,
+    #         "latent_dim": 7552,
+    #         "layers_p": 2,
+    #         "max_mbsz": 512,
+    #         "max_node_ct": 1,
+    #         "accum_for_tgt": 4,
+    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
+    #     },
+    #     "smallest_latent": {
+    #         "d_model": 2048,
+    #         "latent_dim": 256,
+    #         "layers_p": 18,
+    #         "max_mbsz": 64,
+    #         "max_node_ct": 32,
+    #         "accum_for_tgt": 1,
+    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
+    #     },
+    #     "deepest_model": {
+    #         "d_model": 384,
+    #         "latent_dim": 1920,
+    #         "layers_p": 24,
+    #         "max_mbsz": 128,
+    #         "max_node_ct": 16,
+    #         "accum_for_tgt": 1,
+    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
+    #     },
+    # },
     # "extreme_examples_2b": {
     #     "widest_model": {
     #         "d_model": 8192,
@@ -188,7 +189,8 @@ ashwinee_cfgs = {
 
 exp_list = [
     # ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-2, "True", 1],
-    ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-4, "True", 1],
+    # ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-4, "True", 1],
+    ["run_distributed_training.py", "train_lvae_dist_llnl", "True", 1],
 ]
 
 # sweep the model shapes
@@ -226,6 +228,47 @@ for cfg_name, models in ashwinee_cfgs.items():
 
 exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in exp_list]))
 
+# orig hparams
+# lr, muon_lr, kld
+# 1e-4, 2e-2, 1e-4
+
+# lr
+sweep_hparam = [
+#    6e-6,
+#    1e-5,
+   6e-5, # set 1 
+   1e-4, # set 1 
+   6e-4, # set 1 
+#    1e-3,
+#    6e-3,
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+# muon_lr
+sweep_hparam = [
+#    7e-4,
+#    2e-3,
+   7e-3, # set 1
+   2e-2, # set 1 
+   7e-2, # set 1 
+#    2e-1,
+#    7e-1,
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+# kld
+sweep_hparam = [
+#    1e-7,
+#    1e-6,
+   1e-5, # set 1 
+   1e-4, # set 1 
+   1e-3, # set 1 
+#    1e-2,
+#    1e-1
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+
 final_exp_list = exp_list
 for exp in final_exp_list:
     print(exp)
@@ -238,9 +281,9 @@ for exp in final_exp_list:
     (
         script,
         cfg_name,
-        lr,
-        muon_lr,
-        kld,
+        # lr,
+        # muon_lr,
+        # kld,
         compile_model,
         num_lat,
         d_model,
@@ -250,6 +293,9 @@ for exp in final_exp_list:
         gpn,
         mbsz,
         accum,
+        lr,
+        muon_lr,
+        kld,
         # lvae_path, # will be auto selecting from final runname
     ) = exp
 
@@ -265,7 +311,7 @@ for exp in final_exp_list:
     cli_args += f" --config-path conf --config-name {cfg_name}"
 
     # mod lr and kld
-    lr_name_str = f"lr{lr:.0e}-mlr{muon_lr:.0e}-kl{kld:.0e}"
+    lr_name_str = f"lr{lr:.0e}-mlr{muon_lr:.0e}-kld{kld:.0e}"
     lr_cfg_string = f" learning_rate={lr} muon_lr={muon_lr} kld_weight={kld}"
     cli_args += lr_cfg_string
 
@@ -320,7 +366,7 @@ for exp in final_exp_list:
             # f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
             # f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{model_str}_{lr_name_str}"
             # f"{BASE_RUN_NAME}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
-            f"{BASE_RUN_NAME}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
+            f"{BASE_RUN_NAME}_{lr_name_str}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
         )
 
     # # add the lvae path
