@@ -35,7 +35,8 @@ TIME_LIMIT = 1440
 
 # REPETITIONS = 1
 # DEPENDENCY = None
-REPETITIONS = 5
+# REPETITIONS = 5
+REPETITIONS = 10
 DEPENDENCY = "afterany"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
@@ -44,7 +45,8 @@ BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 # BASE_RUN_NAME = f"scale_series_nodes_vs_mbsz"
 # BASE_RUN_NAME = f"scale_series_max_test"
 # BASE_RUN_NAME = f"prod_suite_1b"
-BASE_RUN_NAME = f"og_1b_hp_sweep"
+# BASE_RUN_NAME = f"og_1b_hp_sweep"
+BASE_RUN_NAME = f"prod_og_1b"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
@@ -56,7 +58,8 @@ INDUCTOR_CACHE="/l/ssd/$USER"
 
 MAX_STEPS = None
 # TGT_TOKENS = 100e9
-TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
+# TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
+TGT_TOKENS = 1e12
 
 # TGT_TOKENS = None
 # MAX_STEPS = 100
@@ -236,9 +239,9 @@ exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in ex
 sweep_hparam = [
 #    6e-6,
 #    1e-5,
-   6e-5, # set 1 
+#    6e-5, # set 1 
    1e-4, # set 1 
-   6e-4, # set 1 
+#    6e-4, # set 1 
 #    1e-3,
 #    6e-3,
 ]
@@ -248,9 +251,9 @@ exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]
 sweep_hparam = [
 #    7e-4,
 #    2e-3,
-   7e-3, # set 1
+#    7e-3, # set 1
    2e-2, # set 1 
-   7e-2, # set 1 
+#    7e-2, # set 1 
 #    2e-1,
 #    7e-1,
 ]
@@ -260,8 +263,8 @@ exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]
 sweep_hparam = [
 #    1e-7,
 #    1e-6,
-   1e-5, # set 1 
-   1e-4, # set 1 
+#    1e-5, # set 1 
+#    1e-4, # set 1 
    1e-3, # set 1 
 #    1e-2,
 #    1e-1
