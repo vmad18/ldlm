@@ -50,8 +50,10 @@ unified lvae/lvae_bb/cfm distributed training script
 
 
 # get tf32 to work on amd gpus
-os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
-os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
+if torch.version.hip is not None:
+    print(f"==> Using AMD HIP Backend <==")
+    os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
+    os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
 
 
 generate_kwargs = {
@@ -61,7 +63,7 @@ generate_kwargs = {
     {'max_length':512, 'min_length':5, 'do_sample':True, 'top_p':.95, 'num_beams':1, 'no_repeat_ngram_size':0, 'repetition_penalty':1.2}
 }
 
-
+# enable tf32
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision('high')
@@ -517,7 +519,7 @@ def main(cfg: DictConfig):
     # Determine training mode
     training_mode = getattr(cfg, 'training_mode', 'lvae')
 
-    # determine if we will only use AdamW
+    # determine if we'll only use AdamW
     adam_only = getattr(cfg, "adam_only", False)
 
     # All ranks need to know the results folder for saving per-rank optimizer states
@@ -525,17 +527,24 @@ def main(cfg: DictConfig):
     
     # get the current time
     now_time = datetime.now() 
-    time_path = now_time.strftime("%Y-%m-%d_%H-%M-%S")
+    if master_process:
+        time_path = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    else:
+        time_path = None
+
+    obj = [time_path]
+    dist.broadcast_object_list(obj, src=0)
+    time_path = obj[0]
 
     # global batch size 
     gbz = cfg.grad_accumulate * cfg.train_bs * world_size 
 
     if training_mode in ("lvae", "lvae_bart", "lvae_t5"):
-        run_name = f"{training_mode}-{cfg_hash[:5]}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}-n_lats-{cfg.model.num_latents}-lat_dim-{cfg.model.latent_dim}-kld_beta-{cfg.kld_weight}"
+        run_name = f"{cfg_hash[:10]}-{training_mode}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}-n_lats-{cfg.model.num_latents}-lat_dim-{cfg.model.latent_dim}"
     else:
-        run_name = f"{training_mode}-{cfg_hash[:5]}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}"
+        run_name = f"{cfg_hash[:10]}-{training_mode}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}"
     
-    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / run_name / cfg_hash / time_path
+    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / run_name / cfg_hash # / time_path
 
     # Check if we should auto-resume from existing checkpoint
     if cfg.resume_from is None and results_folder.exists():
@@ -575,9 +584,9 @@ def main(cfg: DictConfig):
         print0(f"Results folder: {results_folder}", logfile, console=True)
         print0(f"Logfile: {logfile}", logfile, console=True)
     
-    decoder_start_token_id: Optional[int] = None
 
-    untokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    decoder_start_token_id: Optional[int] = None
+    use_untokenizer: bool = False
     # Create model and tokenizer based on training mode
     if training_mode == 'lvae':
         # LVAE training mode
@@ -598,7 +607,6 @@ def main(cfg: DictConfig):
             wandb.config.update({"num_vae_params": int(num_vae_params)})
     elif training_mode in ("lvae_bart", "lvae_t5"):
         # Create model and tokenizer
-        
         ctx = nullcontext()
         if cfg.freeze_bb:
             print("==> Using Frozen T5/BART Backbone <==")
@@ -613,6 +621,9 @@ def main(cfg: DictConfig):
             model, tokenizer, bb_cfg = get_latent_vae_tokenizer_bart(cfg, ctx, world_size)
             model: LatentVAEModel = model.cuda()
             
+            if cfg.model.tokenizer_name != "facebook/bart-base":
+                use_untokenizer = True
+
         elif training_mode == "lvae_t5":
             print(f"==> Using T5 Backbone for lvae model")
 
@@ -621,6 +632,11 @@ def main(cfg: DictConfig):
 
             model, tokenizer, bb_cfg = get_latent_vae_tokenizer_t5(cfg, ctx, world_size)
             model: LatentVAEModel = model.cuda()
+
+            if cfg.model.tokenizer_name != "t5":
+                use_untokenizer = True
+                raise NotImplementedError("Need to check what the tokenizer name is for the t5")
+                
 
         else:
             raise ValueError(f"Did not receive a valid lvae-bb backbone. Got {cfg.bb}")
@@ -730,11 +746,18 @@ def main(cfg: DictConfig):
     
     print0(f"Using tokenizer: {tokenizer.name_or_path if hasattr(tokenizer, 'name_or_path') else 'unknown'}", logfile, console=True)
 
+    if use_untokenizer:
+        print0(f"Using gpt-2 tokenizer to detokenize!", logfile, console = True)
+        untokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    else:
+        print0(f"Not detokenizing anything", logfile, console = True)
+        untokenizer = None
+
 
     # Compile model BEFORE loading checkpoint to ensure optimizer parameter references are correct
     if cfg.compile_model:
         print0("Compiling model (before checkpoint loading to preserve optimizer parameter references).", logfile, console=True)
-        # model = torch.compile(model, dynamic=False)
+        model = torch.compile(model, dynamic=False)
     else:
         print0("Skipping model compilation.", logfile, console=True)
 
@@ -790,7 +813,9 @@ def main(cfg: DictConfig):
         dist.broadcast(param.detach(), 0)
 
 
-    if cfg.is_eval and master_process:
+    is_eval = getattr(cfg, "is_eval", False)
+    if is_eval and master_process:
+        # crude evaluate mode lol
         print0(f"==> Performing evaluations only <==", console = True)
 
         # use val dataset for the sake of testing and quick data use
@@ -809,7 +834,7 @@ def main(cfg: DictConfig):
             test_interp(model, val_loader, tokenizer)
 
         exit(0)
-    elif cfg.is_eval:
+    elif is_eval:
         exit(0)
 
 
@@ -872,8 +897,8 @@ def main(cfg: DictConfig):
             summarize_requires_grad("scalar_params",        scalar_params)
 
         print0(f"==> Using Adam + Muon Optimizers", logfile, console = True)
-        optimizer_adam = DistAdam(scalar_params + head_params + embed_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-        optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)     #  + proj_in_params + proj_out_params
+        optimizer_adam = DistAdam(scalar_params + head_params + embed_params + proj_in_params + proj_out_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+        optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
         
         for group in optimizer_adam.param_groups:
             group['initial_lr'] = cfg.learning_rate
@@ -899,6 +924,7 @@ def main(cfg: DictConfig):
             
             if not adam_only:
                 optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
+        
         elif cfg.training_mode == 'cfm':
             optimizer_adam.load_state_dict(optimizer_data['ldlm_optimizer_adam'])
             
@@ -1143,8 +1169,11 @@ def main(cfg: DictConfig):
                     }
                     
                     if not adam_only:
-                        optimizer_checkpoint['lvae_optimizer_muon'] = optimizer_muon.state_dict(),
-                    
+                        optimizer_checkpoint['ldlm_optimizer_muon'] = optimizer_muon.state_dict(),
+                
+
+
+
                 # Save per-rank optimizer states
                 torch.save(optimizer_checkpoint, results_folder / f"optimizer_rank{rank}.pt")
                 

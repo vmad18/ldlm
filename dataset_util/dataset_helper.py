@@ -490,8 +490,8 @@ def distributed_data_generator(
                             rank: int, 
                             world_size: int, 
                             sequence_length: int, 
-                            tokenizer=None, 
-                            untokenizer_gpt=None,
+                            tokenizer = None, 
+                            untokenizer_gpt = None,
                             use_ar_decoding: bool = False,
                             decoder_start_token_id: Optional[int] = None,
                             pad_token_id: Optional[int] = None,
@@ -558,36 +558,34 @@ def distributed_data_generator(
         # Reshape to (local_batch_size, sequence_length)
         batch_tokens = batch_tokens.view(local_batch_size, sequence_length)
 
-        # Convert to CUDA tensors
-        inputs = batch_tokens.to(device="cuda", dtype=torch.int32, non_blocking=True)
+        if untokenizer_gpt is not None and tokenizer is not None:
+            text = untokenizer_gpt.batch_decode(
+                batch_tokens.tolist(),  # convert tensor -> list of lists
+                skip_special_tokens=True
+            )
 
-        text = untokenizer_gpt.batch_decode(
-            batch_tokens.tolist(),  # convert tensor -> list of lists
-            skip_special_tokens=True
-        )
-
-        # 2. Retokenize with new tokenizer (limit length 128)
-        inputs_dict = tokenizer(
-            text,
-            # padding=True,
-            truncation=True,
-            padding="max_length",
-            max_length=128,
-            return_tensors="pt"
-        )
-
-        # 3. Move new input_ids to CUDA if needed
-        inputs = inputs_dict["input_ids"].to(device="cuda", non_blocking=True)
-
-        # Create attention mask (all ones since we're not using padding in this format)
-        attention_mask =  inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64) # inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64)
-
+            # Retokenize with new tokenizer (limit length 128)
+            inputs_dict = tokenizer(
+                text,
+                # padding=True,
+                truncation=True,
+                padding="max_length",
+                max_length=128,
+                return_tensors="pt"
+            )
+            
+            inputs = inputs_dict["input_ids"].to(device="cuda", non_blocking=True)
+            attention_mask =  inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) # torch.ones_like(inputs, dtype=torch.int64) # inputs_dict["attention_mask"].to(device="cuda", non_blocking=True) #
+        else:
+            inputs = batch_tokens.to(device="cuda", dtype=torch.int32, non_blocking=True)
+            attention_mask = torch.ones_like(inputs, dtype=torch.int64)
+ 
         # Create batch dict in the format expected by the model
         batch = {
             "input_ids": inputs,
             "attention_mask": attention_mask,
         }
-        
+    
         if use_ar_decoding:
             if tokenizer is None:
                 assert pad_token_id is not None and decoder_start_token_id is not None, "Expected pad token and start token ids!"
@@ -855,3 +853,8 @@ def get_val_dataloader_lvae_bin(
         start_file_idx=start_file_idx,
         start_pos=start_pos
     )
+
+
+if __name__ == "__main__":
+    print(f"==> Testing Tiny Stories Sharding")
+    process_tiny_stories()
