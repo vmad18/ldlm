@@ -7,6 +7,8 @@ from datasets import load_dataset, Dataset, DatasetDict
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
 from tqdm import tqdm
 
+
+# consts
 MAGIC = 20240520
 VERSION = 1
 HEADER_INTS = 256
@@ -53,7 +55,7 @@ def build_bins_from_dataset(
     streaming: bool = False,
 ):
     """
-    Build FineWeb-style .bin shards from a HuggingFace dataset using a provided tokenizer.
+    Build FineWeb-style .bin shards from a HuggingFace dataset using a provided tokenizer as a pop-in replacement.
     """
     out_dir = Path(out_dir)
 

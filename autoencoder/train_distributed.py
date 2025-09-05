@@ -546,6 +546,9 @@ def main(cfg: DictConfig):
     
     results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / run_name / cfg_hash # / time_path
 
+
+    print(f"==> Results Folder at: {results_folder}")
+
     # Check if we should auto-resume from existing checkpoint
     if cfg.resume_from is None and results_folder.exists():
         potential_checkpoint = results_folder / "model_best.pt"

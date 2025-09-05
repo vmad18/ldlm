@@ -25,11 +25,11 @@ LOG_RECOMPILES=True
 QOS = "pbatch"
 
 # BANK = "effml"
-BANK = "guests"
+BANK = "effml"
 
 # TIME_LIMIT = 59  # in minutes
 # TIME_LIMIT = 15
-TIME_LIMIT = 10
+TIME_LIMIT = 7
 
 # REPETITIONS = 1
 REPETITIONS = 3
@@ -54,7 +54,7 @@ TGT_TOKENS = 100e9  # 100B tokens for 3 epochs
 exp_list = [
     # ["run_distributed_training.py", "train_lvae_dist_llnl_singlelat", 1, 4, 256, 1, 128, 1e-4],
     # ["run_distributed_training.py", "train_lvae_bb_dist_llnl_multilat", 4, 4, 128, 2, 128, 1e-4],
-    ["run_distributed_training.py", "train_lae_killian_dist_llnl_multilat", 2, 2, 128, 2, 128, 1e-4],
+    ["run_distributed_training.py", "train_lae_killian_dist_llnl_multilat", 2, 4, 128, 2, 128, 1e-4],
 ]
 
 final_exp_list = exp_list
