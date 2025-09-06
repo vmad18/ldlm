@@ -23,15 +23,15 @@ EXTRA_COMPILE_FLAGS = True
 # LOG_RECOMPILES=False
 LOG_RECOMPILES = True
 
-QOS = "pdebug"
-# QOS = "pbatch"
+# QOS = "pdebug"
+QOS = "pbatch"
 
 # BANK = "guests"
 BANK = "effml"
 # BANK = "guard"
 
-TIME_LIMIT = 29
-# TIME_LIMIT = 1440
+# TIME_LIMIT = 29
+TIME_LIMIT = 1440
 
 REPETITIONS = 1
 DEPENDENCY = None
@@ -40,13 +40,7 @@ DEPENDENCY = None
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-# BASE_RUN_NAME = f"debug"
-# BASE_RUN_NAME = f"scale_series_nodes_vs_mbsz"
-# BASE_RUN_NAME = f"scale_series_max_test"
-# BASE_RUN_NAME = f"prod_suite_1b"
-# BASE_RUN_NAME = f"og_1b_hp_sweep"
-# BASE_RUN_NAME = f"prod_og_1b"
-BASE_RUN_NAME = f"test_main"
+BASE_RUN_NAME = f"prod_slss_ds_abl"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
@@ -56,13 +50,13 @@ INVOCATION_PREAMBLE = "source .venv/bin/activate && python -u"
 # INDUCTOR_CACHE=None
 INDUCTOR_CACHE="/l/ssd/$USER"
 
-MAX_STEPS = None
+# MAX_STEPS = None
 # TGT_TOKENS = 100e9
 # TGT_TOKENS = 300e9  # 100B tokens for 3 epochs
-TGT_TOKENS = 1e12
+# TGT_TOKENS = 1e12
 
-# TGT_TOKENS = None
-# MAX_STEPS = 100
+TGT_TOKENS = None
+MAX_STEPS = 100e3
 
 TOK_WBSZ_1M = 8192 * 128
 TOK_WBSZ_4M = TOK_WBSZ_1M * 4
@@ -75,15 +69,6 @@ GPN = 4
 
 MAX_MEM = None
 # MAX_MEM = 0.9
-
-# flag to taggle special setup for chaining a compile warmup series
-COMPILE_SERIES = False
-# COMPILE_SERIES = True
-
-if COMPILE_SERIES:
-    assert (
-        DEPENDENCY == "singleton"
-    ), "Compile series warmup workflow requires singleton dependency"
 
 # Cfgs
 ashwinee_cfgs = {
@@ -98,101 +83,9 @@ ashwinee_cfgs = {
             "tgt_tok_wbsz": TOK_WBSZ_1M,
         },
     },
-    # "extreme_examples_1b": {
-    #     "widest_model": {
-    #         "d_model": 5120,
-    #         "latent_dim": 384,
-    #         "layers_p": 2,
-    #         "max_mbsz": 128,
-    #         "max_node_ct": 8,
-    #         "accum_for_tgt": 2,
-    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
-    #     },
-    #     "narrowest_model": {
-    #         "d_model": 256,
-    #         "latent_dim": 2176,
-    #         "layers_p": 20,
-    #         "max_mbsz": 128,
-    #         "max_node_ct": 16,
-    #         "accum_for_tgt": 1,
-    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
-    #     },
-    #     "largest_latent": {
-    #         "d_model": 256,
-    #         "latent_dim": 7552,
-    #         "layers_p": 2,
-    #         "max_mbsz": 512,
-    #         "max_node_ct": 1,
-    #         "accum_for_tgt": 4,
-    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
-    #     },
-    #     "smallest_latent": {
-    #         "d_model": 2048,
-    #         "latent_dim": 256,
-    #         "layers_p": 18,
-    #         "max_mbsz": 64,
-    #         "max_node_ct": 32,
-    #         "accum_for_tgt": 1,
-    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
-    #     },
-    #     "deepest_model": {
-    #         "d_model": 384,
-    #         "latent_dim": 1920,
-    #         "layers_p": 24,
-    #         "max_mbsz": 128,
-    #         "max_node_ct": 16,
-    #         "accum_for_tgt": 1,
-    #         "tgt_tok_wbsz": TOK_WBSZ_1M,
-    #     },
-    # },
-    # "extreme_examples_2b": {
-    #     "widest_model": {
-    #         "d_model": 8192,
-    #         "latent_dim": 5376,
-    #         "layers_p": 2,
-    #         "params_millions": 2487.57,
-    #         "max_mbsz": 64,
-    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
-    #     },
-    #     # # seem like could be too big to run even at the min bsz
-    #     # "largest_latent": {
-    #     #     "d_model": 1280,
-    #     #     "latent_dim": 8192,
-    #     #     "layers_p": 4,
-    #     #     "params_millions": 2486.47,
-    #     #     "max_mbsz": None,
-    #     #     "tgt_tok_wbsz": TOK_WBSZ_4M,
-    #     # },
-    #     "smallest_latent": {
-    #         "d_model": 3328,
-    #         "latent_dim": 256,
-    #         "layers_p": 21,
-    #         "params_millions": 2521.47,
-    #         "max_mbsz": 8,
-    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
-    #     },
-    #     "deepest_model": {
-    #         "d_model": 256,
-    #         "latent_dim": 3328,
-    #         "layers_p": 24,
-    #         "params_millions": 2517.85,
-    #         "max_mbsz": 32,
-    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
-    #     },
-    #     "shallowest_model": {
-    #         "d_model": 6400,
-    #         "latent_dim": 8192,
-    #         "layers_p": 2,
-    #         "params_millions": 2505.12,
-    #         "max_mbsz": 32,
-    #         "tgt_tok_wbsz": TOK_WBSZ_4M,
-    #     },
-    # },
 }
 
 exp_list = [
-    # ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-2, "True", 1],
-    # ["run_distributed_training.py", "train_lvae_dist_llnl", 1e-4, 2e-2, 1e-4, "True", 1],
     ["run_distributed_training.py", "train_lvae_dist_llnl", "True", 1],
 ]
 
@@ -237,39 +130,40 @@ exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in ex
 
 # lr
 sweep_hparam = [
-#    6e-6,
-#    1e-5,
-   6e-5, # set 1 
-#    1e-4, # set 1 
-#    6e-4, # set 1 
-#    1e-3,
-#    6e-3,
+   6e-5,
 ]
 exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
 
 # muon_lr
 sweep_hparam = [
-#    7e-4,
-#    2e-3,
-   7e-3, # set 1
-#    2e-2, # set 1 
-#    7e-2, # set 1 
-#    2e-1,
-#    7e-1,
+   7e-3,
 ]
 exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
 
 # kld
 sweep_hparam = [
-#    1e-7,
-#    1e-6,
-   1e-5, # set 1 
-#    1e-4, # set 1 
-#    1e-3, # set 1 
-#    1e-2,
-#    1e-1
+   1e-5,
 ]
 exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+
+# data
+sweep_hparam = [
+    # [
+    # "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin",
+    # "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin",
+    # ],
+    [
+    "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_train_*.bin",
+    "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_train_*.bin",
+    # "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_test_*.bin",
+    ],
+    [
+    "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/tinystories_gpt2/tiny_train_*.bin",
+    "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/tinystories_gpt2/tiny_validation_*.bin",
+    ],
+]
+exp_list = list(chain(*[[exp + hp for hp in sweep_hparam] for exp in exp_list]))
 
 
 final_exp_list = exp_list
@@ -284,9 +178,6 @@ for exp in final_exp_list:
     (
         script,
         cfg_name,
-        # lr,
-        # muon_lr,
-        # kld,
         compile_model,
         num_lat,
         d_model,
@@ -299,6 +190,8 @@ for exp in final_exp_list:
         lr,
         muon_lr,
         kld,
+        tr_pattern,
+        val_pattern,
         # lvae_path, # will be auto selecting from final runname
     ) = exp
 
@@ -339,13 +232,8 @@ for exp in final_exp_list:
         max_steps = int(MAX_STEPS)
     else:
         raise ValueError(f"Either steps or toks control but not both")
-    # compile series
-    if COMPILE_SERIES:
-        # shortcircuit the training
-        cli_args += f" train_num_steps=10"
-    else:
-        # prod
-        cli_args += f" train_num_steps={max_steps}"
+
+    cli_args += f" train_num_steps={max_steps}"
 
     # compile model
     compile_str = "compiled" if compile_model else "uncompiled"
@@ -354,23 +242,23 @@ for exp in final_exp_list:
     if MAX_MEM is not None:
         cli_args += f" per_process_vram_ratio={MAX_MEM}"
 
+    if "fineweb" in tr_pattern:
+        ds_str = "fw100b-ds"
+    elif "rocstories" in tr_pattern:
+        ds_str = "roc-ds"
+    elif "tinystories" in tr_pattern:
+        ds_str = "tiny-ds"
+    
+    cli_args += f" train_bin_pattern={tr_pattern} val_bin_pattern={val_pattern}"
+
     # mod more things
     # ...
 
     # join to a unique run name for the experiment
-    # run_name = f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}_{compile_str}"
-    # for compilation series
-    if COMPILE_SERIES:
-        # name such that they are an implicit slurm chain by sharing same name
-        run_name = f"{cfg_name_str}"
-    else:
-        # prod
-        run_name = (
-            # f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{lr_name_str}"
-            # f"{cfg_name_str}_{nodes}N{gpus}n_{bsz_name_str}_{model_str}_{lr_name_str}"
-            # f"{BASE_RUN_NAME}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
-            f"{BASE_RUN_NAME}_{lr_name_str}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
-        )
+    run_name = (
+        # f"{BASE_RUN_NAME}_{ds_str}_{lr_name_str}_{model_str}_{bsz_name_str}_{nodes}N{gpus}n"
+        f"{BASE_RUN_NAME}_{ds_str}_{bsz_name_str}_{nodes}N{gpus}n"
+    )
 
     # # add the lvae path
     # if lvae_path is not None:
@@ -387,14 +275,6 @@ for exp in final_exp_list:
 
     # put together the actual "train.py" command
     custom_invocation = f"{INVOCATION_PREAMBLE} {script} {cli_args}"
-
-    # for compilation series
-    if COMPILE_SERIES:
-        # clear the prev ckpts
-        custom_invocation = f"rm -rf {res_folder}/*.pt && {custom_invocation}"
-    else:
-        # prod
-        pass
 
     # make the complete launcher command
     command = f"""\
