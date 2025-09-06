@@ -78,9 +78,11 @@ class LatentAEModel(BartForConditionalGeneration):
                                               num_latents, 
                                               dim_head,
                                               max_tokens, 
-                                              expansion_factor, use_rope, rope_base, qk_norm, layers_p, dev)
+                                              expansion_factor, 
+                                              use_rope, 
+                                              rope_base, qk_norm, layers_p, dev)
 
-        self.ae = VariationalAutoEncoder(cfg_enc, cfg_dec)
+        self.vae = VariationalAutoEncoder(cfg_enc, cfg_dec)
 
         self.dim = cfg_enc.dim
         self.latent_dim = cfg_enc.latent_dim
@@ -88,11 +90,12 @@ class LatentAEModel(BartForConditionalGeneration):
 
         self.max_tokens = cfg_enc.max_tokens
 
-
         self.num_dev = num_dev
         self.freeze = ctx
 
-    def get_bart_encodings(self, input_ids: torch.Tensor, attn_mask: torch.Tensor):
+    def get_bart_encodings(self, 
+                           input_ids: torch.Tensor, 
+                           attn_mask: torch.Tensor) -> torch.Tensor:
         with self.freeze:
             if self.num_dev > 1: 
                 encoder_outs = self.module.get_encoder()(input_ids = input_ids, attention_mask = attn_mask.bool())
@@ -100,7 +103,9 @@ class LatentAEModel(BartForConditionalGeneration):
                 encoder_outs = self.get_encoder()(input_ids = input_ids, attention_mask = attn_mask.bool())
         return encoder_outs
 
-    def get_latents(self, input_ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor: 
+    def get_latents(self, 
+                    input_ids: torch.Tensor, 
+                    attn_mask: torch.Tensor) -> torch.Tensor:
         bart_encodings = self.get_bart_encodings(input_ids, attn_mask)[0]
         return self.ae.reparameterize(*self.ae.encode(bart_encodings, attn_mask.bool()), only_mu=True)
 
@@ -108,7 +113,9 @@ class LatentAEModel(BartForConditionalGeneration):
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return self.ae.decode(latent)
 
-    def autoencode(self, input_ids: torch.Tensor, attn_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def autoencode(self, 
+                   input_ids: torch.Tensor, 
+                   attn_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         *_, s = input_ids.shape 
         bart_encodings = self.get_bart_encodings(input_ids, attn_mask)
         recon_encs, mu, log_var = self.ae(bart_encodings[0], attn_mask.bool())
@@ -117,7 +124,7 @@ class LatentAEModel(BartForConditionalGeneration):
         return bart_encodings, self.ae.cont_loss_func(recon_encs, bart_encodings[0], mu, log_var)
 
 
-def get_latent_ae_tokenizer(args, ctx, num_dev: int = 1) -> Tuple[LatentAEModel, PreTrainedTokenizerBase, PretrainedConfig]:
+def get_latent_lvae_tokenizer(args, ctx, num_dev: int = 1) -> Tuple[LatentAEModel, PreTrainedTokenizerBase, PretrainedConfig]:
     config = BartForConditionalGeneration.from_pretrained("facebook/bart-base").config
     ae = LatentAEModel.from_pretrained(
                                         "facebook/bart-base", 
@@ -131,12 +138,12 @@ def get_latent_ae_tokenizer(args, ctx, num_dev: int = 1) -> Tuple[LatentAEModel,
                                         num_dev = num_dev, _fast_init=False) 
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained("facebook/bart-base") 
 
-    if args.freeze_bb == 'ft':
+    if not args.freeze_bb:
         for (param_name, param) in ae.named_parameters():
             param.requires_grad = True
-    elif args.freeze_bb == 'freeze':
+    elif args.freeze_bb:
         for (param_name, param) in ae.named_parameters():
-            if re.fullmatch(".*ae.*", param_name):
+            if re.fullmatch(".*vae.*", param_name):
                 param.requires_grad = True
                 print(f"Trainable: {param_name}")
             else:

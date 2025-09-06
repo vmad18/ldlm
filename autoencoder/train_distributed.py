@@ -30,12 +30,44 @@ from datetime import datetime, timedelta
 from autoencoder.latent_vae import LatentVAEModel, get_latent_vae_tokenizer
 from dataset_util.dataset_helper import get_dataloader_lvae_bin, wind_data_generator
 
+# VAE-BB imports
+from transformers import BartForConditionalGeneration, get_scheduler, AutoTokenizer, PreTrainedTokenizerBase, \
+    BartForConditionalGeneration, AutoModelForCausalLM
+from transformers.modeling_outputs import BaseModelOutput
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, GPT2Tokenizer 
+
+
 # CFM imports - added for conditional flow matching training
 from diffusion.cond_flow_matcher import ConditionalFlowMatcher
 from diffusion.neural_diffusion import DiTModel, DiTConfig
 
+
+"""
+unified lvae/lvae_bb/cfm distributed training script
+"""
+
+#TODO: fix gradient slices if training on a different number of gpus
+
+
+# get tf32 to work on amd gpus
+if torch.version.hip is not None:
+    print(f"==> Using AMD HIP Backend <==")
+    os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
+    os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
+
+
+generate_kwargs = {
+    'beam': 
+    {'max_length':512, 'min_length':5, 'do_sample':False, 'num_beams':4, 'no_repeat_ngram_size':0, 'repetition_penalty':1.2},
+    'nucleus':
+    {'max_length':512, 'min_length':5, 'do_sample':True, 'top_p':.95, 'num_beams':1, 'no_repeat_ngram_size':0, 'repetition_penalty':1.2}
+}
+
+# enable tf32
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('high')
+
 
 @torch.compile
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
@@ -161,6 +193,8 @@ class DistAdam(torch.optim.Optimizer):
             grad = torch.empty_like(params[-1])
             for base_i in range(len(params)):
                 grad = params[base_i].grad
+                if grad is None:
+                    continue
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
                 reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
@@ -208,6 +242,7 @@ class DistAdam(torch.optim.Optimizer):
                 all_reduce_futures.append(dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future())
         torch.futures.collect_all(all_reduce_futures).wait()
 
+
 # Helper functions
 def exists(x):
     return x is not None
@@ -230,32 +265,66 @@ def num_parameters(module: nn.Module, requires_grad: Optional[bool] = None) -> i
     return total
 
 # CFM helper functions
-def euler_solver(x_0: torch.Tensor, t_steps: torch.Tensor, model: DiTModel, device):
-    """Euler solver for CFM generation"""
+# def euler_solver(x_0: torch.Tensor, t_steps: torch.Tensor, model: DiTModel, device):
+#     """Euler solver for CFM generation"""
+#     x = x_0
+#     dt = t_steps[1] - t_steps[0]
+
+#     for t_step in range(t_steps.shape[0] - 1):
+#         t = t_steps[t_step] * torch.ones(x_0.shape[0], device=device)
+#         t = ConditionalFlowMatcher.pad_t_like_x(t, x)
+#         dx = model(x, t)  # approx. trajectory step
+#         x = x + dx * dt  # euler integrate
+#     return x
+
+def euler_solver(
+                x_0: torch.Tensor, 
+                y_cond: torch.Tensor,
+                t_steps: torch.Tensor, 
+                model: DiTModel, 
+                device):
     x = x_0
     dt = t_steps[1] - t_steps[0]
+    guidance_scale = 1.5
 
     for t_step in range(t_steps.shape[0] - 1):
         t = t_steps[t_step] * torch.ones(x_0.shape[0], device=device)
         t = ConditionalFlowMatcher.pad_t_like_x(t, x)
-        dx = model(x, t)  # approx. trajectory step
+        dx_uncond = model(x, t, y_cond, True)  # approx. uncond trajectory step
+
+        if guidance_scale > 0:
+            dx_cond = model(x, t, y_cond, False)  # approx. cond trajectory step
+            dx = dx_uncond +  guidance_scale * (dx_cond - dx_uncond)
+        else:
+            dx = dx_uncond
+
         x = x + dx * dt  # euler integrate
+
     return x
 
-def gen_cfm_samples(model: DiTModel, num_latents: int, dim_latents: int, 
-                   batch_size: int, device: torch.device, steps: int, 
-                   target_dtype: torch.dtype, method: str = "euler"):
+
+def gen_cfm_samples(model: DiTModel, 
+                    y_cond: torch.Tensor,
+                    num_latents: int, 
+                    dim_latents: int, 
+                    batch_size: int, 
+                    device: torch.device, 
+                    steps: int, 
+                    target_dtype: torch.dtype, 
+                    method: str = "euler"):
     """Generate samples using CFM model"""
     with torch.no_grad():
         x_0 = torch.randn((batch_size, num_latents, dim_latents), device=device, dtype=target_dtype)
         t_steps = torch.linspace(0, 1, steps + 1, device=device)
 
         if method == "euler":
-            traj = euler_solver(x_0, t_steps, model, device)
+            traj = euler_solver(x_0, y_cond, t_steps, model, device)
         else:
             raise NotImplementedError
     return traj
 
+
+# helper training methods
 def handle_checkpoint_config(cfg: DictConfig, rank: int):
     """Handle checkpoint loading and config merging for both LVAE and CFM training."""
     # Handle checkpoint loading: if loading from external checkpoint, use its config for model creation
@@ -293,6 +362,8 @@ def handle_checkpoint_config(cfg: DictConfig, rank: int):
     
     return cfg
 
+
+# logging
 def print0(s, logfile=None, console=False, flush=False):
     """Print only from rank 0"""
     if dist.get_rank() == 0:
@@ -302,16 +373,96 @@ def print0(s, logfile=None, console=False, flush=False):
             with open(logfile, "a") as f:
                 print(s, file=f, flush=flush)
 
+
+def save_self_as_txt(directory: Path | None = None):
+    """ saves the current script to a .txt file inside the given directory. """
+    current_file = Path(__file__)
+    
+    if directory is None:
+        directory = current_file.parent
+
+    directory.mkdir(parents=True, exist_ok=True)
+    dest_file = directory / f"{current_file.stem}_ref.txt"
+    dest_file.write_text(current_file.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"Saved a copy of {current_file} as {dest_file}")
+
+
+
+# analysis
+@torch.no_grad()
+def test_interp(model, 
+                data, 
+                tokenizer) -> None:
+    model.eval()
+
+    num_val_batches = 25
+    total_val_loss = 0.
+    total_recon_loss = 0.
+    total_kld_loss = 0.
+
+    encoded_latents = []
+    original_ids = [] 
+
+    for _ in range(num_val_batches):
+        val_data = {k: v.cuda() for k, v in next(data).items()}
+        latents = model.get_latents(val_data["input_ids"], attention_mask=val_data["attention_mask"])
+        original_ids.append(val_data["input_ids"])
+        encoded_latents.append(latents)
+    
+
+    random_pairs = []
+    for _ in range(40):
+        pair = (random.randint(0, 24), 
+            random.randint(0, 24))
+        random_pairs.append(pair)
+
+    print("==> Random pairs <==")
+    print(random_pairs)
+    for (latent_idx_1, latent_idx_2) in random_pairs:
+        for alpha in [0.1, 0.25, 0.4, 0.41, 0.42, 0.43, 0.44, 0.45, 0.48, 0.49, 0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.58, 0.59, 0.6, 0.75, 0.8]:
+            latent_interp = alpha * encoded_latents[latent_idx_1][0][None, :] + (1 - alpha) * encoded_latents[latent_idx_2][0][None, :]
+            ids = model.decode_latent(latent_interp)
+            recon_text = tokenizer.batch_decode(ids.cpu(), skip_special_tokens=True)
+            print(f"==> Interp w/ alpha: {alpha}:")
+            print(recon_text)
+            print()
+            print()
+
+
+        ids = model.decode_latent(encoded_latents[latent_idx_1][0][None, :])
+        ids_2 = model.decode_latent(encoded_latents[latent_idx_2][0][None, :])
+
+        recon_text_1 = tokenizer.batch_decode(ids.cpu(), skip_special_tokens=True)
+        recon_text_2 = tokenizer.batch_decode(ids_2.cpu(), skip_special_tokens=True)
+
+
+        original_text = tokenizer.batch_decode(original_ids[latent_idx_1][0][None, :], skip_special_tokens=True)
+        original_text_2 = tokenizer.batch_decode(original_ids[latent_idx_2][0][None, :], skip_special_tokens=True)
+
+
+        print(f"==> RECON TEXT 1:\n", recon_text_1)
+        print()
+        print()
+        print(f"==> RECON TEXT 2:\n", recon_text_2)
+        print()
+        print()
+        print(f"==> ORIGINAL TEXT:\n", original_text)
+        print()
+        print()
+
+
 def main(cfg: DictConfig):
     """
     Main training function supporting both LVAE and CFM training modes.
     
     Training modes:
     - 'lvae': Train a Latent VAE using Muon + DistAdam optimizers
+    - 'lvae_bb': Train a Latent VAE using Muon + DistAdam optimizers
     - 'cfm': Train a Conditional Flow Matcher using a pre-trained frozen LVAE
     
     For CFM training, cfg.model.lvae_model_path must point to a trained LVAE checkpoint.
     """
+
 
     # Initialize distributed training
     # The convention is to:
@@ -337,6 +488,7 @@ def main(cfg: DictConfig):
         # timeout=timedelta(minutes=5),
         timeout=timedelta(minutes=30), # relax the timeout
     )
+    
     # _Must_ this come after?
     # idk, @jog did it this way back in summer of 24' so that's good enough for me.
     torch.cuda.set_device(device)
@@ -364,10 +516,39 @@ def main(cfg: DictConfig):
     
     # Setup logging
     logfile = None
+    # Determine training mode
+    training_mode = getattr(cfg, 'training_mode', 'lvae')
+
+    # determine if we'll only use AdamW
+    adam_only = getattr(cfg, "adam_only", False)
+
     # All ranks need to know the results folder for saving per-rank optimizer states
     cfg_hash = hashlib.md5(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()
-    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / cfg_hash
     
+    # get the current time
+    now_time = datetime.now() 
+    if master_process:
+        time_path = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    else:
+        time_path = None
+
+    obj = [time_path]
+    dist.broadcast_object_list(obj, src=0)
+    time_path = obj[0]
+
+    # global batch size 
+    gbz = cfg.grad_accumulate * cfg.train_bs * world_size 
+
+    if training_mode in ("lvae", "lvae_bart", "lvae_t5"):
+        run_name = f"{cfg_hash[:10]}-{training_mode}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}-n_lats-{cfg.model.num_latents}-lat_dim-{cfg.model.latent_dim}"
+    else:
+        run_name = f"{cfg_hash[:10]}-{training_mode}-gbz-{gbz}-grad_accum-{cfg.grad_accumulate}-seq_len-{cfg.model.max_seq_len}"
+    
+    results_folder = Path(cfg.results_folder) if cfg.results_folder is not None else Path(cfg.output_dir) / run_name / cfg_hash # / time_path
+
+
+    print(f"==> Results Folder at: {results_folder}")
+
     # Check if we should auto-resume from existing checkpoint
     if cfg.resume_from is None and results_folder.exists():
         potential_checkpoint = results_folder / "model_best.pt"
@@ -375,6 +556,8 @@ def main(cfg: DictConfig):
             cfg.resume_from = str(results_folder)
             print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
 
+
+    print0(f"Training mode: {training_mode}", logfile, console=True)
     if master_process:
         
         results_folder.mkdir(parents=True, exist_ok=True)
@@ -387,21 +570,26 @@ def main(cfg: DictConfig):
         run_id = uuid.uuid4()
         logfile = results_folder / f"{run_id}.txt"
         
+        project_name = "lvae-distributed"
+        if training_mode == "cfm":
+            project_name = "cfm-distributed"
+
         wandb.init(
-            project="lvae-distributed",
-            name=f"{cfg.wandb_name}-{cfg_hash[:8]}" if cfg.wandb_name else f"run-{cfg_hash[:8]}",
+            project=project_name,
+            name=f"{cfg.wandb_name}-{cfg_hash[:8]}" if cfg.wandb_name else f"run-{training_mode}-{cfg_hash[:8]}",
             dir=str(results_folder),
             config=OmegaConf.to_container(cfg, resolve=True),
             mode=cfg.wandb_mode if cfg.wandb_mode else 'online',
         )
-        
+
+        # save current script's state to txt file (useful to look back if order of opt. states are diff)
+        save_self_as_txt(results_folder)
         print0(f"Results folder: {results_folder}", logfile, console=True)
         print0(f"Logfile: {logfile}", logfile, console=True)
     
-    # Determine training mode
-    training_mode = getattr(cfg, 'training_mode', 'lvae')
-    print0(f"Training mode: {training_mode}", logfile, console=True)
-    
+
+    decoder_start_token_id: Optional[int] = None
+    use_untokenizer: bool = False
     # Create model and tokenizer based on training mode
     if training_mode == 'lvae':
         # LVAE training mode
@@ -412,6 +600,58 @@ def main(cfg: DictConfig):
         lvae_model = None
         cfm_model = None
         
+        num_vae_params = num_parameters(model, requires_grad=None)
+        num_vae_params_reqgrad = num_parameters(model, requires_grad=True)
+        num_vae_params_noreqgrad = num_parameters(model, requires_grad=False)
+        print0(f"Created VAE model with {num_vae_params/1e6:.1f}M parameters", logfile, console=True)
+        print0(f"Created VAE model with {num_vae_params_reqgrad/1e6:.1f}M params that req grad", logfile, console=True)
+        print0(f"Created VAE model with {num_vae_params_noreqgrad/1e6:.1f}M params that don't req grad", logfile, console=True)
+        if master_process:
+            wandb.config.update({"num_vae_params": int(num_vae_params)})
+    elif training_mode in ("lvae_bart", "lvae_t5"):
+        # Create model and tokenizer
+        ctx = nullcontext()
+        if cfg.freeze_bb:
+            print("==> Using Frozen T5/BART Backbone <==")
+            ctx = torch.no_grad()
+
+        if training_mode == "lvae_bart":
+            print(f"==> Using BART Backbone for lvae model")
+
+            from .bart_lvae import LatentVAEModel, get_latent_vae_tokenizer_bart
+            from dataset_util.dataset_helper import get_dataloader_lvae_t5 as get_dataloader
+            
+            model, tokenizer, bb_cfg = get_latent_vae_tokenizer_bart(cfg, ctx, world_size)
+            model: LatentVAEModel = model.cuda()
+            
+            if cfg.model.tokenizer_name != "facebook/bart-base":
+                use_untokenizer = True
+
+        elif training_mode == "lvae_t5":
+            print(f"==> Using T5 Backbone for lvae model")
+
+            from .t0_pp_lvae import LatentVAEModel, get_latent_vae_tokenizer_t5
+            from dataset_util.dataset_helper import get_dataloader_lvae_t5 as get_dataloader
+
+            model, tokenizer, bb_cfg = get_latent_vae_tokenizer_t5(cfg, ctx, world_size)
+            model: LatentVAEModel = model.cuda()
+
+            if cfg.model.tokenizer_name != "t5":
+                use_untokenizer = True
+                raise NotImplementedError("Need to check what the tokenizer name is for the t5")
+                
+
+        else:
+            raise ValueError(f"Did not receive a valid lvae-bb backbone. Got {cfg.bb}")
+        
+        decoder_start_token_id = bb_cfg.decoder_start_token_id
+        
+        print(f"Decoding Start Token ID: {decoder_start_token_id}")
+
+        flow_matcher = None
+        lvae_model = None
+        cfm_model = None
+
         num_vae_params = num_parameters(model, requires_grad=None)
         num_vae_params_reqgrad = num_parameters(model, requires_grad=True)
         num_vae_params_noreqgrad = num_parameters(model, requires_grad=False)
@@ -434,9 +674,29 @@ def main(cfg: DictConfig):
             raise FileNotFoundError(f"LVAE config not found at {lvae_config_path}")
         
         loaded_lvae_cfg = OmegaConf.load(lvae_config_path)
-        lvae_model, tokenizer = get_latent_vae_tokenizer(loaded_lvae_cfg.model)
-        lvae_model = lvae_model.cuda()
+
+        ctx = torch.no_grad()
+        if loaded_lvae_cfg.training_mode == "lvae_bart":
+            print(f"==> Using BART Backbone for lvae model")
+            from .bart_lvae import LatentVAEModel, get_latent_vae_tokenizer_bart
+            from dataset_util.dataset_helper import get_dataloader_lvae_t5 as get_dataloader
+            
+            lvae_model, tokenizer, bb_cfg = get_latent_vae_tokenizer_bart(loaded_lvae_cfg, ctx, world_size)
+            lvae_model: LatentVAEModel = lvae_model.cuda()
+        elif loaded_lvae_cfg.training_mode == "lvae_t5":
+            print(f"==> Using T5 Backbone for lvae model")
+
+            from .t0_pp_lvae import LatentVAEModel, get_latent_vae_tokenizer_t5
+            from dataset_util.dataset_helper import get_dataloader_lvae_t5 as get_dataloader
+
+            lvae_model, tokenizer, bb_cfg = get_latent_vae_tokenizer_t5(loaded_lvae_cfg, ctx, world_size)
+            lvae_model: LatentVAEModel = lvae_model.cuda()
+        else:
+            print(f"==> Using scratch (one-shot) lvae")
+            lvae_model, tokenizer = get_latent_vae_tokenizer(loaded_lvae_cfg.model)
+            lvae_model = lvae_model.cuda()
         
+
         # Load LVAE checkpoint
         lvae_checkpoint_path = os.path.join(cfg.model.lvae_model_path, 'model_best.pt')
         if not os.path.exists(lvae_checkpoint_path):
@@ -481,13 +741,21 @@ def main(cfg: DictConfig):
         print0(f"Created CFM model with {num_cfm_params/1e6:.1f}M parameters", logfile, console=True)
         print0(f"Created CFM model with {num_cfm_params_reqgrad/1e6:.1f}M params that req grad", logfile, console=True)
         print0(f"Created CFM model with {num_cfm_params_noreqgrad/1e6:.1f}M params that don't req grad", logfile, console=True)
+        print0(f"LVAE Best Validation Loss: {lvae_data['best_val_loss']}", logfile, console=True)
         if master_process:
             wandb.config.update({"num_cfm_params": int(num_cfm_params)})
-    
     else:
         raise ValueError(f"Unknown training mode: {training_mode}")
     
     print0(f"Using tokenizer: {tokenizer.name_or_path if hasattr(tokenizer, 'name_or_path') else 'unknown'}", logfile, console=True)
+
+    if use_untokenizer:
+        print0(f"Using gpt-2 tokenizer to detokenize!", logfile, console = True)
+        untokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    else:
+        print0(f"Not detokenizing anything", logfile, console = True)
+        untokenizer = None
+
 
     # Compile model BEFORE loading checkpoint to ensure optimizer parameter references are correct
     if cfg.compile_model:
@@ -495,6 +763,7 @@ def main(cfg: DictConfig):
         model = torch.compile(model, dynamic=False)
     else:
         print0("Skipping model compilation.", logfile, console=True)
+
 
     # Load checkpoint if resuming (AFTER compilation so optimizer refs are correct)
     step = 0
@@ -520,7 +789,7 @@ def main(cfg: DictConfig):
         data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
         
         # Load model state dict first (each rank loads the same state, so no broadcast needed)
-        if training_mode == 'lvae':
+        if training_mode in ('lvae', "lvae_bart", "lvae_t5"):
             # For LVAE training, look for 'lvae_model' first, then 'model'
             if 'lvae_model' in data:
                 # load into the unwrapped model if wrapped
@@ -545,37 +814,104 @@ def main(cfg: DictConfig):
 
     for param in model.parameters():
         dist.broadcast(param.detach(), 0)
-    
-    embed_params, head_params, pos_embed_params, hidden_matrix_params, scalar_params = [], [], [], [], []
-    # Carefully separate parameters to avoid size mismatches
-    for n, p in model.named_parameters():
-        if "dembed_head" in n:
-            head_params.append(p)
-            # print0(f"Head param: {n}, Shape: {p.shape}", logfile, console=True)
-        elif "pos_embed" in n:
-            pos_embed_params.append(p)
-            # print0(f"Pos embed param: {n}, Shape: {p.shape}", logfile, console=True)
-        elif "embed" in n:
-            embed_params.append(p)
-            # print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
-        elif p.ndim >= 2:
-            hidden_matrix_params.append(p)
-            # print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
-        elif p.ndim < 2:
-            scalar_params.append(p)
-            # print0(f"Scalar param: {n}, Shape: {p.shape}", logfile, console=True)
 
-    optimizer_adam = DistAdam(scalar_params + head_params + embed_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-    optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
+
+    is_eval = getattr(cfg, "is_eval", False)
+    if is_eval and master_process:
+        # crude evaluate mode lol
+        print0(f"==> Performing evaluations only <==", console = True)
+
+        # use val dataset for the sake of testing and quick data use
+        val_loader = get_dataloader_lvae_bin(
+                        cfg, 
+                        cfg.val_bin_pattern, 
+                        rank, 
+                        world_size,
+                        tokenizer=tokenizer,
+                        untokenizer_gpt = untokenizer,
+                        use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+                        decoder_start_token_id = decoder_start_token_id, 
+                        pad_token_id = tokenizer.pad_token_id,)
+        if training_mode in ("lvae_bart", "lvae_t5", "lvae"):
+            print0(f"LVAE interp test", console = True)
+            test_interp(model, val_loader, tokenizer)
+
+        exit(0)
+    elif is_eval:
+        exit(0)
+
+
+    if adam_only or training_mode == "cfm":
+        adam_only = True 
+
+        print0(f"==> Using AdamW Only <==", logfile, console = True)
+        optimizer_adam = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1) 
+        
+        for group in optimizer_adam.param_groups:
+            group['initial_lr'] = cfg.learning_rate
+
+        optimizers = [optimizer_adam]
+    else:
+        adam_only = False
+        
+        embed_params, head_params, pos_embed_params, hidden_matrix_params, scalar_params = [], [], [], [], []
+        proj_in_params, proj_out_params = [], []
+
+        # Carefully separate parameters to avoid size mismatches
+        for n, p in model.named_parameters():
+            # TODO: identify what BART uses for embed and dembed layer names for lvae_bb
+            if "dembed_head" in n and p.requires_grad:
+                head_params.append(p)
+                # print0(f"Head param: {n}, Shape: {p.shape}", logfile, console=True)
+            elif "pos_embed" in n and p.requires_grad:
+                pos_embed_params.append(p)
+                # print0(f"Pos embed param: {n}, Shape: {p.shape}", logfile, console=True)
+            elif "embed" in n and p.requires_grad:
+                embed_params.append(p)
+                # print0(f"Embed param: {n}, Shape: {p.shape}", logfile, console=True)
+            # elif "proj_in_l" in n and p.requires_grad:
+            #     proj_in_params.append(p)
+            # elif "proj_out_l" in n and p.requires_grad:
+            #     proj_out_params.append(p)
+            elif p.ndim >= 2 and p.requires_grad:
+                hidden_matrix_params.append(p)
+                # print0(f"Hidden matrix param: {n}, Shape: {p.shape}", logfile, console=True)
+            elif p.ndim < 2 and p.requires_grad:
+                scalar_params.append(p)
+                # print0(f"Scalar param: {n}, Shape: {p.shape}", logfile, console=True)
+
+        def summarize_requires_grad(name, params):
+            total = len(params)
+            if total == 0:
+                print(f"{name:<22} EMPTY")
+                return
+            trainable = [p for p in params if p.requires_grad]
+            n_trainable = len(trainable)
+            elems_total = sum(p.numel() for p in params)
+            elems_train = sum(p.numel() for p in trainable)
+            status = "ALL" if n_trainable == total else ("NONE" if n_trainable == 0 else "MIXED")
+            print0(f"{name:<22} {status:>5} — tensors {n_trainable}/{total}, elements {elems_train:,}/{elems_total:,}", logfile, console=True)
+
+        if master_process:
+            summarize_requires_grad("embed_params",         embed_params)
+            summarize_requires_grad("head_params",          head_params)
+            summarize_requires_grad("pos_embed_params",     pos_embed_params)
+            summarize_requires_grad("hidden_matrix_params", hidden_matrix_params)
+            summarize_requires_grad("scalar_params",        scalar_params)
+
+        print0(f"==> Using Adam + Muon Optimizers", logfile, console = True)
+        optimizer_adam = DistAdam(scalar_params + head_params + embed_params + proj_in_params + proj_out_params, lr=cfg.learning_rate, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+        optimizer_muon = Muon(hidden_matrix_params + pos_embed_params, lr=cfg.muon_lr, momentum=0.95, weight_decay=0.0)
+        
+        for group in optimizer_adam.param_groups:
+            group['initial_lr'] = cfg.learning_rate
+        for group in optimizer_muon.param_groups:
+            group['initial_lr'] = cfg.muon_lr
     
+        optimizers = [optimizer_adam, optimizer_muon]
+
+
     # Set initial_lr for proper learning rate scheduling after resume
-    for group in optimizer_adam.param_groups:
-        group['initial_lr'] = cfg.learning_rate
-    for group in optimizer_muon.param_groups:
-        group['initial_lr'] = cfg.muon_lr
-    
-    optimizers = [optimizer_adam, optimizer_muon]
-    
     if cfg.resume_from is not None:
         step = data['step']
         best_val_loss = data['best_val_loss']
@@ -586,20 +922,26 @@ def main(cfg: DictConfig):
         
         optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
         
-        if cfg.training_mode == 'lvae':
+        if cfg.training_mode in ('lvae', 'lvae_bart', 'lvae_t5'):
             optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
-            optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
+            
+            if not adam_only:
+                optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
+        
         elif cfg.training_mode == 'cfm':
             optimizer_adam.load_state_dict(optimizer_data['ldlm_optimizer_adam'])
-            optimizer_muon.load_state_dict(optimizer_data['ldlm_optimizer_muon'])
+            
+            if not adam_only:
+                optimizer_muon.load_state_dict(optimizer_data['ldlm_optimizer_muon'])
 
         print(f"Loaded best per-rank optimizer states for rank {rank}")
 
-        optimizer_adam.zero_grad(set_to_none=True)
-        optimizer_muon.zero_grad(set_to_none=True)
-
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)    
+        
         print0(f"Checkpoint loaded successfully. Resuming from step {step}", logfile, console=True)
     
+
     # Setup data loaders AFTER checkpoint loading so we can wind to correct position
     if cfg.resume_from is not None and step > 0:
         # We're resuming training, so wind the data generator to the correct position
@@ -612,7 +954,11 @@ def main(cfg: DictConfig):
             step,
             rank,
             world_size,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            untokenizer_gpt=untokenizer,
+            use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+            decoder_start_token_id = decoder_start_token_id, 
+            pad_token_id = tokenizer.pad_token_id,
         )
     else:
         # Normal startup, create fresh data loaders
@@ -621,7 +967,11 @@ def main(cfg: DictConfig):
             cfg.train_bin_pattern, 
             rank, 
             world_size,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            untokenizer_gpt = untokenizer,
+            use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+            decoder_start_token_id = decoder_start_token_id, 
+            pad_token_id = tokenizer.pad_token_id,
         )
         
     val_loader = get_dataloader_lvae_bin(
@@ -629,9 +979,14 @@ def main(cfg: DictConfig):
         cfg.val_bin_pattern, 
         rank, 
         world_size,
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        untokenizer_gpt = untokenizer,
+        use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+        decoder_start_token_id = decoder_start_token_id, 
+        pad_token_id = tokenizer.pad_token_id,
     )
     
+
     # Setup learning rate scheduling
     def get_lr(step: int):
         # Simple linear warmup then cosine decay
@@ -651,6 +1006,7 @@ def main(cfg: DictConfig):
                 return cfg.kld_weight
         return 1.0  # Default for CFM training
 
+
     print0("Starting training...", logfile, console=True)
     
     torch.cuda.synchronize()
@@ -667,7 +1023,10 @@ def main(cfg: DictConfig):
             training_time_ms += 1000 * (time.perf_counter() - t0)
             
             model.eval()
+            #----------
+            # val losses
             val_loss = 0
+            val_lm_loss = 0 
             val_recon_loss = 0
             val_kld_loss = 0
             num_val_batches = 25
@@ -686,11 +1045,32 @@ def main(cfg: DictConfig):
                         val_loss += loss.item()
                         val_recon_loss += losses['reconstruction_loss'].item()
                         val_kld_loss += losses['kld_loss'].item()
-                        
+                    elif training_mode in ("lvae_bart", "lvae_t5"):
+                        losses = model(**batch)
+                        current_kld_weight = get_annealed_kld_weight(step)
+
+                        if cfg.use_precomputed_latents:
+                            recon_loss = losses['reconstruction_loss']
+                            kld_loss = losses['kld_loss']
+                            loss = recon_loss + current_kld_weight * kld_loss
+
+
+                            val_recon_loss  += recon_loss.item()
+                            val_kld_loss += kld_loss.item()
+                            val_lm_loss += 0.0                     
+                            val_loss += loss.item()
+                        else:
+                            loss = losses["lm_loss"] + current_kld_weight * losses["vae_loss"]["kld_loss"] # + losses["vae_loss"]['reconstruction_loss']
+
+                            val_loss += loss.item()
+                            val_lm_loss += losses["lm_loss"].item()
+                            val_kld_loss += losses["vae_loss"]["kld_loss"].item()
+                            val_recon_loss += losses["vae_loss"]["reconstruction_loss"].item() 
+
                     elif training_mode == 'cfm':
                         # CFM validation
                         with torch.no_grad():
-                            latent = lvae_model.get_latents(input_ids=batch['input_ids'], attn_mask=batch.get('attention_mask'))
+                            latent = lvae_model.get_latents(input_ids=batch['input_ids'], attention_mask=batch.get('attention_mask'))
                         
                         # Determine model dtype for CFM
                         model_dtype = next(model.parameters()).dtype
@@ -706,6 +1086,7 @@ def main(cfg: DictConfig):
                         val_kld_loss += 0.0    # Not applicable for CFM
             
             val_loss /= num_val_batches
+            val_lm_loss /= num_val_batches
             val_recon_loss /= num_val_batches
             val_kld_loss /= num_val_batches
             
@@ -719,10 +1100,15 @@ def main(cfg: DictConfig):
                 val_recon_loss = val_recon_loss_tensor.item()
                 val_kld_loss = val_kld_loss_tensor.item()
             
+            if training_mode in ("lvae_bart", "lvae_t5"):
+                val_lm_loss_tensor = torch.tensor(val_lm_loss, device=device)
+                dist.all_reduce(val_lm_loss_tensor, op = dist.ReduceOp.AVG)
+                val_lm_loss = val_lm_loss_tensor.item()
+
             dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
             val_loss = val_loss_tensor.item()
             
-            # Check if this is a new best model (all ranks need to know)
+            # Check if this is a new best model (all ranks need to know)            
             is_new_best = val_loss < best_val_loss
             if is_new_best:
                 best_val_loss = val_loss
@@ -750,7 +1136,7 @@ def main(cfg: DictConfig):
                     }
                     
                     # Save model with appropriate key based on training mode
-                    if training_mode == 'lvae':
+                    if training_mode in ('lvae', "lvae_bart", "lvae_t5"):
                         checkpoint['lvae_model'] = unwrapped_model.state_dict()
                         print0("Saving LVAE model checkpoint", logfile, console=True)
                     elif training_mode == 'cfm':
@@ -766,21 +1152,31 @@ def main(cfg: DictConfig):
                         print0(f"New best val loss: {best_val_loss}")
                 
                 # Per-rank optimizer states (saved by each rank)
-                if training_mode == 'lvae':
+                if training_mode in ('lvae', 'lvae_bart', 'lvae_t5'):
                     optimizer_checkpoint = {
                         'lvae_optimizer_adam': optimizer_adam.state_dict(),
-                        'lvae_optimizer_muon': optimizer_muon.state_dict(),
+                        # 'lvae_optimizer_muon': optimizer_muon.state_dict(),
                         'rank': rank,
                         'step': step  # For verification
                     }
+
+                    if not adam_only:
+                        optimizer_checkpoint['lvae_optimizer_muon'] = optimizer_muon.state_dict(),
+                    
                 elif training_mode == 'cfm':
                     optimizer_checkpoint = {
                         'ldlm_optimizer_adam': optimizer_adam.state_dict(),
-                        'ldlm_optimizer_muon': optimizer_muon.state_dict(),
+                        # 'ldlm_optimizer_muon': optimizer_muon.state_dict(),
                         'rank': rank,
                         'step': step  # For verification
                     }
+                    
+                    if not adam_only:
+                        optimizer_checkpoint['ldlm_optimizer_muon'] = optimizer_muon.state_dict(),
                 
+
+
+
                 # Save per-rank optimizer states
                 torch.save(optimizer_checkpoint, results_folder / f"optimizer_rank{rank}.pt")
                 
@@ -802,6 +1198,11 @@ def main(cfg: DictConfig):
                            f"val_recon_loss:{val_recon_loss:.4f} val_kld_loss:{val_kld_loss:.4f} "
                            f"train_time:{training_time_ms/1e3:.0f}s step_avg:{training_time_ms/1e3/max(step, 1):.2f}s",
                            logfile, console=True)
+                if training_mode in ('lvae_bart', 'lvae_t5'):
+                    print0(f"step:{step}/{cfg.train_num_steps} val_loss:{val_loss:.4f} "
+                           f"val_recon_loss:{val_recon_loss:.4f} val_kld_loss:{val_kld_loss:.4f} val_lm_loss:{val_lm_loss:.4f} "
+                           f"train_time:{training_time_ms/1e3:.0f}s step_avg:{training_time_ms/1e3/max(step, 1):.2f}s",
+                           logfile, console=True)
                 elif training_mode == 'cfm':
                     print0(f"step:{step}/{cfg.train_num_steps} val_loss:{val_loss:.4f} "
                            f"train_time:{training_time_ms/1e3:.0f}s step_avg:{training_time_ms/1e3/max(step, 1):.2f}s",
@@ -812,6 +1213,7 @@ def main(cfg: DictConfig):
                     "val/loss": val_loss,
                     "val/reconstruction_loss": val_recon_loss,
                     "val/kld_loss": val_kld_loss,
+                    "val/lm_loss": val_lm_loss,
                     "step": step,
                     "epoch": epoch,
                     "training_time_ms": training_time_ms
@@ -854,7 +1256,37 @@ def main(cfg: DictConfig):
                         for gen in generated_texts:
                             gen_table.add_data(gen)
                         logs["generated_samples"] = gen_table
+                    
+                    elif training_mode in ("lvae_bart", "lvae_t5"):
+                        # Reconstruction samples
+                        batch = next(val_loader)
+                        batch = {k: v[:4].cuda() for k, v in batch.items()}
+                        input_ids = batch["input_ids"]
                         
+                        losses = model(**batch)
+                        enc_outs = losses["encoder_outputs"]
+                        
+                        generated_ids = model.generate(encoder_outputs = enc_outs, **generate_kwargs["beam"])
+                        reconstructed_texts = tokenizer.batch_decode(generated_ids.cpu(), skip_special_tokens = True)
+                        original_texts = tokenizer.batch_decode(input_ids.cpu(), skip_special_tokens=True)
+                        
+                        recon_table = wandb.Table(columns=["Original", "Reconstructed"])
+                        for orig, recon in zip(original_texts, reconstructed_texts):
+                            recon_table.add_data(orig, recon)
+                        logs["reconstructions"] = recon_table
+                        
+
+                        # Generation samples
+                        num_gen_samples = 6
+                        latents = torch.randn((num_gen_samples, model.num_latents, model.latent_dim), device=device)
+                        gen_ids = model.decode_latent(latents, max_length = cfg.model.max_seq_len)
+                        generated_texts = tokenizer.batch_decode(gen_ids.cpu(), skip_special_tokens=True)
+                        
+                        gen_table = wandb.Table(columns=["Generated Text"])
+                        for gen in generated_texts:
+                            gen_table.add_data(gen)
+                        logs["generated_samples"] = gen_table
+
                     elif training_mode == 'cfm':
                         # CFM generation samples
                         model.eval()
@@ -862,8 +1294,24 @@ def main(cfg: DictConfig):
                         gen_steps = getattr(cfg, 'cfm_gen_steps', 50)
                         model_dtype = next(model.parameters()).dtype
                         
+
+
+                        batch = next(val_loader)
+                        batch = {k: v.cuda() for k, v in batch.items()}
+                        with torch.no_grad():
+                            input_ids = batch["input_ids"][:4]
+                            attn_mask = batch["attention_mask"][:4]
+    
+                            cond, trgt = input_ids.chunk(2, dim=-1)
+                            cond_mask, trgt_mask = attn_mask.chunk(2, dim=-1)
+
+                            latent_cond = lvae_model.get_latents(input_ids=cond, attention_mask=cond_mask, mu_only = True)
+                            latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+
+
                         latents = gen_cfm_samples(
                             model=model,
+                            y_cond=latent_cond,
                             num_latents=lvae_model.num_latents,
                             dim_latents=lvae_model.latent_dim,
                             batch_size=num_gen_samples,
@@ -874,8 +1322,8 @@ def main(cfg: DictConfig):
                         )
                         
                         with torch.no_grad():
-                            gen_logits = lvae_model.decode_latent(latents)
-                            gen_ids = torch.argmax(gen_logits, dim=-1)
+                            gen_ids = lvae_model.decode_latent(latents, max_length = cfg.model.max_seq_len)
+                            # gen_ids = torch.argmax(gen_logits, dim=-1)
                         
                         generated_texts = tokenizer.batch_decode(gen_ids.cpu(), skip_special_tokens=True)
                         
@@ -884,8 +1332,6 @@ def main(cfg: DictConfig):
                             gen_table.add_data(gen)
                         logs["generated_samples"] = gen_table
                         
-                        model.train()
-                
                 wandb.log(logs, step=step)
             
             model.train()
@@ -899,9 +1345,9 @@ def main(cfg: DictConfig):
             break
         
         total_loss = 0.0
+        total_lm_loss = 0.0
         total_recon_loss = 0.0
         total_kld_loss = 0.0
-        
         for _ in range(cfg.grad_accumulate):
             batch = next(train_loader)
             batch = {k: v.cuda() for k, v in batch.items()}
@@ -918,27 +1364,63 @@ def main(cfg: DictConfig):
                 total_loss += loss.item()
                 total_recon_loss += recon_loss.item() / cfg.grad_accumulate
                 total_kld_loss += kld_loss.item() / cfg.grad_accumulate
-                
+            
+            elif training_mode == "lvae_bart" or training_mode == "lvae_t5":
+                losses = model(**batch)
+
+                current_kld_weight = get_annealed_kld_weight(step)
+                if cfg.use_precomputed_latents:
+                    # Loss for VAE-only training on latents
+                    recon_loss = losses['reconstruction_loss']
+                    kld_loss = losses['kld_loss']
+                    loss = (recon_loss + current_kld_weight * kld_loss) / cfg.grad_accumulate
+
+                    total_loss += loss.item()
+                    total_lm_loss += 0.0 / cfg.grad_accumulate
+                    total_recon_loss  += recon_loss.item() / cfg.grad_accumulate
+                    total_kld_loss += kld_loss.item() / cfg.grad_accumulate
+                else:
+                    # + losses['vae_loss']["reconstruction_loss"]
+                    loss = (losses['lm_loss'] + current_kld_weight * losses['vae_loss']["kld_loss"]) / cfg.grad_accumulate
+                    total_loss += loss.item()
+                    total_lm_loss += losses['lm_loss'].item() / cfg.grad_accumulate
+                    total_kld_loss += losses['vae_loss']["kld_loss"].item() / cfg.grad_accumulate
+                    total_recon_loss += losses['vae_loss']["reconstruction_loss"].item() / cfg.grad_accumulate
+
             elif training_mode == 'cfm':
                 # CFM training
-                with torch.no_grad():
-                    latent = lvae_model.get_latents(input_ids=batch['input_ids'], attn_mask=batch.get('attention_mask'))
+                # with torch.no_grad():
+                #     latent = lvae_model.get_latents(input_ids=batch['input_ids'], attention_mask=batch.get('attention_mask'))
                 
+                with torch.no_grad():
+
+                    bsz, s = batch['input_ids'].shape
+
+                    cond, trgt = batch['input_ids'].chunk(2, dim=-1)
+                    cond_mask, trgt_mask = batch.get('attention_mask').chunk(2, dim=-1)
+
+                    latent_cond = lvae_model.get_latents(input_ids=cond, attention_mask=cond_mask, mu_only = True)
+                    latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+
+
+
                 # Determine model dtype for CFM
                 model_dtype = next(model.parameters()).dtype
+
+                latent_cond = latent_cond.to(dtype=model_dtype)
                 latent = latent.to(dtype=model_dtype)
                 
                 x_0 = torch.randn_like(latent)
                 t, x_t, u_t = flow_matcher.get_sample_location_and_conditional_flow(x_0, latent)
-                v_t = model(x_t, t)
+                v_t = model(x_t, t, latent_cond)
                 loss = F.mse_loss(v_t.float(), u_t.float()) / cfg.grad_accumulate
                 
                 total_loss += loss.item()
                 total_recon_loss += 0.0  # Not applicable for CFM
-                total_kld_loss += 0.0    # Not applicable for CFM
+                total_kld_loss += 0.0    # Not applicable for CFM            
             
             loss.backward()
-        
+
         grad_norm = compute_grad_norm(model.parameters())
         # Update learning rates
         current_lr = get_lr(step)
@@ -946,12 +1428,13 @@ def main(cfg: DictConfig):
         for group in optimizer_adam.param_groups:
             group["lr"] = group.get("initial_lr", cfg.learning_rate) * current_lr
         
-        # Muon optimizer - use cfg.muon_lr as base  
-        for group in optimizer_muon.param_groups:
-            group["lr"] = group.get("initial_lr", cfg.muon_lr) * current_lr
-        
+        if not adam_only:
+            # Muon optimizer - use cfg.muon_lr as base  
+            for group in optimizer_muon.param_groups:
+                group["lr"] = group.get("initial_lr", cfg.muon_lr) * current_lr
+            
         # Momentum warmup for Muon (only if momentum isn't already warmed up)
-        if step < 300:
+        if step < 300 and (not adam_only):
             frac = min(step / 300, 1)
             for group in optimizer_muon.param_groups:
                 group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
@@ -959,8 +1442,8 @@ def main(cfg: DictConfig):
         # Optimizer step
         for opt in optimizers:
             opt.step()
+            
         model.zero_grad(set_to_none=True)
-        
         # Logging
         if step % cfg.log_step_interval == 0 or first_step:
             # Calculate common metrics for both training modes
@@ -991,11 +1474,11 @@ def main(cfg: DictConfig):
             adam_beta1 = 0.9
             
             # Get current momentum/beta for logging (from first param group)
-            if training_mode == 'lvae':
-                muon_momentum = optimizer_muon.param_groups[0]["momentum"] if optimizer_muon.param_groups else 0.0
+            if training_mode == 'lvae' or training_mode == 'lvae_bart' or training_mode == 'lvae_t5':
+                muon_momentum = optimizer_muon.param_groups[0]["momentum"] if (not adam_only) and optimizer_muon.param_groups else 0.0
                 current_kld_weight = get_annealed_kld_weight(step)
                 print0(f"step:{step+1}/{cfg.train_num_steps} loss:{total_loss:.4f} "
-                       f"recon_loss:{total_recon_loss:.4f} kld_loss:{total_kld_loss:.4f} "
+                       f"recon_loss:{total_recon_loss:.4f} kld_loss:{total_kld_loss:.4f} lm_loss:{total_lm_loss:.4f} "
                        f"kld_weight:{current_kld_weight:.6f} grad_norm:{grad_norm:.4f} "
                        f"lr:{current_lr:.6f} muon_momentum:{muon_momentum:.3f} "
                        f"train_time:{approx_training_time_ms/1e3:.0f}s "
@@ -1010,7 +1493,7 @@ def main(cfg: DictConfig):
                        logfile, console=True)
                        
             elif training_mode == 'cfm':
-                muon_momentum = optimizer_muon.param_groups[0]["momentum"] if optimizer_muon.param_groups else 0.0
+                muon_momentum = optimizer_muon.param_groups[0]["momentum"] if (not adam_only) and optimizer_muon.param_groups else 0.0
                 
                 print0(f"step:{step+1}/{cfg.train_num_steps} loss:{total_loss:.4f} "
                        f"grad_norm:{grad_norm:.4f} lr:{current_lr:.6f} "
@@ -1048,6 +1531,14 @@ def main(cfg: DictConfig):
                     logs.update({
                         "train/reconstruction_loss": total_recon_loss,
                         "train/kld_loss": total_kld_loss,
+                        "train/kld_weight": current_kld_weight,
+                        "train/muon_momentum": muon_momentum,
+                    })
+                elif training_mode == 'lvae_bart' or training_mode == 'lvae_t5':
+                    logs.update({
+                        "train/reconstruction_loss": total_recon_loss,
+                        "train/kld_loss": total_kld_loss,
+                        "train/lm_loss": total_lm_loss,
                         "train/kld_weight": current_kld_weight,
                         "train/muon_momentum": muon_momentum,
                     })

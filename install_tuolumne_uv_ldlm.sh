@@ -20,7 +20,7 @@ echo "Conda Version:"
 conda env list | grep '*'
 
 # Create conda environment, and print whether it is loaded correctly
-conda create --prefix ${INSTALLDIR}/$ENV_NAME python=3.12 --yes -c defaults
+conda create --prefix ${INSTALLDIR}/$ENV_NAME python=3.12.10 --yes -c defaults
 source activate ${INSTALLDIR}/$ENV_NAME
 echo "Pip Version:" $(which pip)  # should be from the new environment!
 
