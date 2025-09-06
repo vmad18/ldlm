@@ -33,11 +33,10 @@ BANK = "effml"
 # TIME_LIMIT = 29
 TIME_LIMIT = 1440
 
-# REPETITIONS = 1
-# DEPENDENCY = None
-# REPETITIONS = 5
-REPETITIONS = 10
-DEPENDENCY = "afterany"
+REPETITIONS = 1
+DEPENDENCY = None
+# REPETITIONS = 3
+# DEPENDENCY = "afterany"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
@@ -239,8 +238,8 @@ exp_list = list(chain(*[[exp + hparams for hparams in hparam_list] for exp in ex
 sweep_hparam = [
 #    6e-6,
 #    1e-5,
-#    6e-5, # set 1 
-   1e-4, # set 1 
+   6e-5, # set 1 
+#    1e-4, # set 1 
 #    6e-4, # set 1 
 #    1e-3,
 #    6e-3,
@@ -251,8 +250,8 @@ exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]
 sweep_hparam = [
 #    7e-4,
 #    2e-3,
-#    7e-3, # set 1
-   2e-2, # set 1 
+   7e-3, # set 1
+#    2e-2, # set 1 
 #    7e-2, # set 1 
 #    2e-1,
 #    7e-1,
@@ -263,9 +262,9 @@ exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]
 sweep_hparam = [
 #    1e-7,
 #    1e-6,
-#    1e-5, # set 1 
+   1e-5, # set 1 
 #    1e-4, # set 1 
-   1e-3, # set 1 
+#    1e-3, # set 1 
 #    1e-2,
 #    1e-1
 ]
