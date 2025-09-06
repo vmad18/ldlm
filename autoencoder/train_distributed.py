@@ -49,11 +49,11 @@ unified lvae/lvae_bb/cfm distributed training script
 #TODO: fix gradient slices if training on a different number of gpus
 
 
-# get tf32 to work on amd gpus
-if torch.version.hip is not None:
-    print(f"==> Using AMD HIP Backend <==")
-    os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
-    os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
+# # get tf32 to work on amd gpus
+# if torch.version.hip is not None:
+#     print(f"==> Using AMD HIP Backend <==")
+#     os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
+#     os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
 
 
 generate_kwargs = {
@@ -193,8 +193,8 @@ class DistAdam(torch.optim.Optimizer):
             grad = torch.empty_like(params[-1])
             for base_i in range(len(params)):
                 grad = params[base_i].grad
-                if grad is None:
-                    continue
+                # if grad is None:
+                #     continue
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
                 reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future())

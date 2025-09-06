@@ -228,23 +228,19 @@ class AutoEncodingBlock(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__() 
 
-        # self.attn_toks = MultiHeadAttn(cfg)
         self.attn = PerceiverAttention(cfg) 
-
         self.ffn1 = FeedForward(cfg, cfg.dim)
         self.ffn2 = FeedForward(cfg, cfg.latent_dim)
 
-        # self.attn_toks_ln = nn.LayerNorm(cfg.dim)
-        self.ffn1_ln = nn.LayerNorm(cfg.dim)
-        self.ffn2_ln = nn.LayerNorm(cfg.latent_dim) 
+        self.ln1 = nn.LayerNorm(cfg.dim, device = cfg.dev)
+        self.ln2 = nn.LayerNorm(cfg.latent_dim, device = cfg.dev) 
 
     def forward(self, x: torch.Tensor, latents: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        latents = latents + self.attn(x, latents, mask) # cross attend latents
-        latents = latents + self.ffn2(self.ffn2_ln(latents)) # channel mix latents
+        latents = self.attn(x, latents, mask) + latents
+        x_trans = self.ffn1(self.ln1(x)) + x 
+        latents = self.ffn2(self.ln2(latents)) + latents 
 
-        # x = x + self.attn_toks(self.attn_toks_ln(x))
-        x = x + self.ffn1(self.ffn1_ln(x))
-        return x, latents
+        return x_trans, latents
 
 class PerceiverResampler(nn.Module): 
 
@@ -253,7 +249,7 @@ class PerceiverResampler(nn.Module):
 
         self.pos_embed = AbsolutePositionalEmbedding(cfg, cfg.dim)
 
-        self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim))) 
+        self.latents = nn.Parameter(torch.randn((cfg.num_latents, cfg.latent_dim), device=cfg.dev))
         nn.init.normal_(self.latents, std = 0.02) 
 
         self.blocks = nn.ModuleList([])
@@ -262,12 +258,12 @@ class PerceiverResampler(nn.Module):
             self.blocks.append(AutoEncodingBlock(cfg))
 
         self.f_attn = PerceiverAttention(cfg)
-        self.latent_norm = nn.LayerNorm(cfg.latent_dim)
+        self.latent_norm = nn.LayerNorm(cfg.latent_dim, device=cfg.dev)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, *_ = x.shape
 
-        x = x  + self.pos_embed(x)
+        x = x + self.pos_embed(x)
         
         latents = repeat(self.latents, "n d -> b n d", b = x.shape[0])
 
@@ -275,17 +271,18 @@ class PerceiverResampler(nn.Module):
             x, latents = block(x, latents, mask)
 
         latents = self.f_attn(x, latents, mask)
+
         latents = self.latent_norm(latents)
+
         return latents
 
 
 class VariationalAutoEncoder(nn.Module):
     def __init__(self, cfg_enc: Config, cfg_dec: Config, create_encoder: bool = True) -> None:
         super().__init__()
-
         if create_encoder:
             self.encoder = PerceiverResampler(cfg_enc)
-            self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim)
+            self.mu_lsigma = nn.Linear(cfg_enc.latent_dim, 2 * cfg_enc.latent_dim, device=cfg_enc.dev)
         else:
             self.encoder = None
             self.mu_lsigma = None

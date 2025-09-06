@@ -81,7 +81,7 @@ class LatentVAEModel(nn.Module):
         self.vae = VariationalAutoEncoder(cfg_enc, cfg_dec)
 
         self.embed = nn.Embedding(vocab_size, d_model, device=dev) 
-        self.norm = nn.LayerNorm(d_model, device=dev)
+        # self.norm = nn.LayerNorm(d_model, device=dev)
         self.dembed_head = nn.Linear(d_model, vocab_size, device=dev)
         
         self.vocab_size = vocab_size
@@ -91,9 +91,9 @@ class LatentVAEModel(nn.Module):
 
         self.max_tokens = cfg_enc.max_tokens
 
-        self.ar_decoder = None
-        if use_ar_decoding:
-            self.ar_decoder = ARDecoder(cfg_enc)
+        # self.ar_decoder = None
+        # if use_ar_decoding:
+        #     self.ar_decoder = ARDecoder(cfg_enc)
 
         self.freeze = ctx
  
@@ -120,10 +120,10 @@ class LatentVAEModel(nn.Module):
 
         recon_encs, mu, log_var = self.vae(embeddings, attn_mask.bool(), mu_only)
         
-        if self.ar_decoder is not None: 
-            recon_encs = self.ar_decoder(recon_encs)
+        # if self.ar_decoder is not None: 
+        #     recon_encs = self.ar_decoder(recon_encs)
         
-        recon_encs = self.norm(recon_encs) 
+        # recon_encs = self.norm(recon_encs) 
         recon_encs = self.dembed_head(recon_encs[..., :s, :])
         return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), input_ids.view(-1).to(torch.int64), mu, log_var)
 
