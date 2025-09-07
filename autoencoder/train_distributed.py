@@ -50,10 +50,10 @@ unified lvae/lvae_bb/cfm distributed training script
 
 
 # get tf32 to work on amd gpus
-if torch.version.hip is not None:
-    print(f"==> Using AMD HIP Backend <==")
-    os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
-    os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
+# if torch.version.hip is not None:
+#     print(f"==> Using AMD HIP Backend <==")
+#     os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
+#     os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
 
 
 generate_kwargs = {
@@ -66,7 +66,7 @@ generate_kwargs = {
 # enable tf32
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision('high')
+# torch.set_float32_matmul_precision('high')
 
 
 @torch.compile
@@ -193,8 +193,6 @@ class DistAdam(torch.optim.Optimizer):
             grad = torch.empty_like(params[-1])
             for base_i in range(len(params)):
                 grad = params[base_i].grad
-                if grad is None:
-                    continue
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
                 reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
@@ -554,9 +552,9 @@ def main(cfg: DictConfig):
         potential_checkpoint = results_folder / "model_best.pt"
         if potential_checkpoint.exists():
             cfg.resume_from = str(results_folder)
-            print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
-
-
+            print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", logfile, console=True)
+    
+    print0(f"Resume from: {results_folder.exists()}", logfile, console = True)
     print0(f"Training mode: {training_mode}", logfile, console=True)
     if master_process:
         
@@ -844,7 +842,7 @@ def main(cfg: DictConfig):
     if adam_only or training_mode == "cfm":
         adam_only = True 
 
-        print0(f"==> Using AdamW Only <==", logfile, console = True)
+        print0(f"==> Only Using AdamW", logfile, console = True)
         optimizer_adam = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1) 
         
         for group in optimizer_adam.param_groups:
@@ -926,13 +924,13 @@ def main(cfg: DictConfig):
             optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
             
             if not adam_only:
-                optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'])
+                optimizer_muon.load_state_dict(optimizer_data['lvae_optimizer_muon'][0])
         
         elif cfg.training_mode == 'cfm':
             optimizer_adam.load_state_dict(optimizer_data['ldlm_optimizer_adam'])
             
             if not adam_only:
-                optimizer_muon.load_state_dict(optimizer_data['ldlm_optimizer_muon'])
+                optimizer_muon.load_state_dict(optimizer_data['ldlm_optimizer_muon'][0])
 
         print(f"Loaded best per-rank optimizer states for rank {rank}")
 
