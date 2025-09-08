@@ -13,6 +13,7 @@ Report/
 
 # jwk: maybe I'm missing some uv boilerplate in bashrc or smthn
 .venv
+.venv_old
 
 # v18 testing files/scripts
 test_lvae_bb_dist.py
@@ -22,6 +23,12 @@ results_test/
 test_run/
 run_lvae_test.py
 tuolumne*.core
+dataset_util/tin_stories_bart_bin/
+dataset_util/tiny_stories_bin/
+datasets_lovelace/
+outputs_test/ 
+outputs_test2/
+outputs_killian/ 
 
 # mi installer
 !install*.sh
