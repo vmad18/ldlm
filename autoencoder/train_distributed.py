@@ -48,14 +48,6 @@ unified lvae/lvae_bb/cfm distributed training script
 
 #TODO: fix gradient slices if training on a different number of gpus
 
-
-# get tf32 to work on amd gpus
-# if torch.version.hip is not None:
-#     print(f"==> Using AMD HIP Backend <==")
-#     os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "1"
-#     os.environ["HIPBLASLT_ALLOW_TF32"] = "1"
-
-
 generate_kwargs = {
     'beam': 
     {'max_length':512, 'min_length':5, 'do_sample':False, 'num_beams':4, 'no_repeat_ngram_size':0, 'repetition_penalty':1.2},
@@ -66,8 +58,6 @@ generate_kwargs = {
 # enable tf32
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-# torch.set_float32_matmul_precision('high')
-
 
 @torch.compile
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
