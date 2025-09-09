@@ -370,8 +370,8 @@ def main(cfg: DictConfig):
     
     # Check if we should auto-resume from existing checkpoint
     if cfg.resume_from is None and results_folder.exists():
-        potential_checkpoint = results_folder / "model_best.pt"
-        if potential_checkpoint.exists():
+        potential_checkpoints = [results_folder / "model_best.pt", results_folder / "model.pt"]
+        if any([ckpt.exists() for ckpt in potential_checkpoints]):
             cfg.resume_from = str(results_folder)
             print0(f"Auto-resuming from existing checkpoint: {cfg.resume_from}", console=True)
 
@@ -438,7 +438,7 @@ def main(cfg: DictConfig):
         lvae_model = lvae_model.cuda()
         
         # Load LVAE checkpoint
-        lvae_checkpoint_path = os.path.join(cfg.model.lvae_model_path, 'model_best.pt')
+        lvae_checkpoint_path = os.path.join(cfg.model.lvae_model_path, ('model_best.pt' if cfg.model['lvae_resume_strat'] == 'best' else 'model.pt'))
         if not os.path.exists(lvae_checkpoint_path):
             raise FileNotFoundError(f"LVAE checkpoint not found at {lvae_checkpoint_path}")
         
@@ -507,14 +507,12 @@ def main(cfg: DictConfig):
         # Load model state first, then recreate optimizers to avoid parameter reference issues
         checkpoint_path = Path(cfg.resume_from)
         checkpoint_file = None
-        for filename in ['model_best.pt', 'model.pt']:
-            potential_path = checkpoint_path / filename
-            if potential_path.exists():
-                checkpoint_file = potential_path
-                break
-        
-        if checkpoint_file is None:
-            raise FileNotFoundError(f"No checkpoint file found in {checkpoint_path}")
+        potential_path = checkpoint_path / ("model_best.pt" if cfg.resume_strat == 'best' else "model.pt")
+        if potential_path.exists():
+            checkpoint_file = potential_path
+            print(f"Checkpoint file for '{cfg.resume_strat}' strategy found in {checkpoint_path}")
+        else:
+            raise FileNotFoundError(f"No checkpoint file for '{cfg.resume_strat}' strategy found in {checkpoint_path}")
         
         # Load main checkpoint data
         data = torch.load(str(checkpoint_file), map_location=device, weights_only=False)
@@ -582,9 +580,9 @@ def main(cfg: DictConfig):
         training_time_ms = data['training_time_ms']
         
         # Try to load per-rank optimizer states
-        per_rank_best_optimizer_path = checkpoint_path / f"optimizer_best_rank{rank}.pt"
+        per_rank_optimizer_path = checkpoint_path / (f"optimizer_best_rank{rank}.pt" if cfg.resume_strat == 'best' else f"optimizer_rank{rank}.pt")
         
-        optimizer_data = torch.load(str(per_rank_best_optimizer_path), map_location=device, weights_only=False)
+        optimizer_data = torch.load(str(per_rank_optimizer_path), map_location=device, weights_only=False)
         
         if cfg.training_mode == 'lvae':
             optimizer_adam.load_state_dict(optimizer_data['lvae_optimizer_adam'])
@@ -593,7 +591,7 @@ def main(cfg: DictConfig):
             optimizer_adam.load_state_dict(optimizer_data['ldlm_optimizer_adam'])
             optimizer_muon.load_state_dict(optimizer_data['ldlm_optimizer_muon'])
 
-        print(f"Loaded best per-rank optimizer states for rank {rank}")
+        print(f"Loaded '{cfg.resume_strat}' per-rank optimizer states for rank {rank}")
 
         optimizer_adam.zero_grad(set_to_none=True)
         optimizer_muon.zero_grad(set_to_none=True)
@@ -650,6 +648,13 @@ def main(cfg: DictConfig):
             else:
                 return cfg.kld_weight
         return 1.0  # Default for CFM training
+
+    if cfg.startup_only:
+        dist.barrier()
+        wandb.finish()
+        print0("Startup test complete, exiting early...", logfile, console=True)
+        dist.destroy_process_group()
+        exit(0)
 
     print0("Starting training...", logfile, console=True)
     

@@ -24,13 +24,12 @@ EXTRA_COMPILE_FLAGS = True
 LOG_RECOMPILES = True
 
 # QOS = "pdebug"
-QOS = "pbatch"
-
 # BANK = "guests"
+# TIME_LIMIT = 29
+
+QOS = "pbatch"
 BANK = "effml"
 # BANK = "guard"
-
-# TIME_LIMIT = 29
 TIME_LIMIT = 1440
 
 REPETITIONS = 1
@@ -56,7 +55,8 @@ INDUCTOR_CACHE="/l/ssd/$USER"
 # TGT_TOKENS = 1e12
 
 TGT_TOKENS = None
-MAX_STEPS = 100e3
+# MAX_STEPS = 100e3
+MAX_STEPS = 200e3
 
 TOK_WBSZ_1M = 8192 * 128
 TOK_WBSZ_4M = TOK_WBSZ_1M * 4
