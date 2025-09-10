@@ -29,6 +29,7 @@ datasets_lovelace/
 outputs_test/ 
 outputs_test2/
 outputs_killian/ 
+outputs_killian_old/
 
 # mi installer
 !install*.sh

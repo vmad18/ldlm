@@ -16,7 +16,7 @@ model:
   dim_head: 128
   max_seq_len: 128
   num_layers: 12
-  tokenizer_name: "gpt2"
+  tokenizer_name: "gpt2" # facebook/bart-base
 
 # Training configuration
 train_num_steps: 100000
@@ -36,8 +36,10 @@ fsdp: false
 # Data configuration
 # train_bin_pattern: "/p/vast1/pretrain/datasets/diffusion/fineweb100B/fineweb_train_*.bin"
 # val_bin_pattern: "/p/vast1/pretrain/datasets/diffusion/fineweb100B/fineweb_val_*.bin"
-train_bin_pattern: "/p/vast1/madan2/diffusion-root/ldlm/dataset_util/tin_stories_bart_bin/tiny_train_*.bin"
-val_bin_pattern: "/p/vast1/madan2/diffusion-root/ldlm/dataset_util/tin_stories_bart_bin/tiny_validation_*.bin"
+train_bin_pattern: "/p/vast1/madan2/diffusion-root/ldlm/dataset_util/rocstories_bin/roc_stories_train_*.bin"
+val_bin_pattern: "/p/vast1/madan2/diffusion-root/ldlm/dataset_util/rocstories_bin/roc_stories_test_*.bin" 
+# "/p/vast1/madan2/diffusion-root/ldlm/dataset_util/tiny_stories_bin/tiny_train_*.bin"
+# val_bin_pattern: "/p/vast1/madan2/diffusion-root/ldlm/dataset_util/tiny_stories_bin/tiny_validation_*.bin"
 
 total_tokens: 100000000000  # 100B tokens
 
@@ -53,7 +55,7 @@ adam_only: false
 
 # VAE configuration
 kld_weight: 0.0
-kld_annealing_steps: 5000
+kld_annealing_steps: 2000
 use_precomputed_latents: False
 
 # Logging configuration

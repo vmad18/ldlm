@@ -512,9 +512,14 @@ def main(cfg: DictConfig):
 
     # All ranks need to know the results folder for saving per-rank optimizer states
     cfg_hash = hashlib.md5(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()
-    
+
+    cond_cfm: bool = False
+    if training_mode == "cfm": 
+        cond_cfm = getattr(cfg, "cond_cfm", False)
+        if cond_cfm: 
+            cfg.model.max_seq_len *= 2
+
     # get the current time
-    now_time = datetime.now() 
     if master_process:
         time_path = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     else:
@@ -578,6 +583,7 @@ def main(cfg: DictConfig):
 
     decoder_start_token_id: Optional[int] = None
     use_untokenizer: bool = False
+    use_ar_decoding: bool = False
     # Create model and tokenizer based on training mode
     if training_mode == 'lvae':
         # LVAE training mode
@@ -634,6 +640,7 @@ def main(cfg: DictConfig):
         
         decoder_start_token_id = bb_cfg.decoder_start_token_id
         
+        use_ar_decoding = True
         print(f"Decoding Start Token ID: {decoder_start_token_id}")
 
         flow_matcher = None
@@ -671,6 +678,10 @@ def main(cfg: DictConfig):
             
             lvae_model, tokenizer, bb_cfg = get_latent_vae_tokenizer_bart(loaded_lvae_cfg, ctx, world_size)
             lvae_model: LatentVAEModel = lvae_model.cuda()
+            decoder_start_token_id = bb_cfg.decoder_start_token_id
+            if loaded_lvae_cfg.model.tokenizer_name != "facebook/bart-base":
+                use_untokenizer = True
+            
         elif loaded_lvae_cfg.training_mode == "lvae_t5":
             print(f"==> Using T5 Backbone for lvae model")
 
@@ -679,12 +690,17 @@ def main(cfg: DictConfig):
 
             lvae_model, tokenizer, bb_cfg = get_latent_vae_tokenizer_t5(loaded_lvae_cfg, ctx, world_size)
             lvae_model: LatentVAEModel = lvae_model.cuda()
+            decoder_start_token_id = bb_cfg.decoder_start_token_id
+            if loaded_lvae_cfg.model.tokenizer_name != "t5":
+                use_untokenizer = True
+                raise NotImplementedError("Need to check what the tokenizer name is for the t5")
+                
         else:
             print(f"==> Using scratch (one-shot) lvae")
             lvae_model, tokenizer = get_latent_vae_tokenizer(loaded_lvae_cfg.model)
             lvae_model = lvae_model.cuda()
         
-
+        use_ar_decoding = (loaded_lvae_cfg.training_mode == "lvae_bart" or loaded_lvae_cfg.training_mode == "lvae_t5")
         # Load LVAE checkpoint
         lvae_checkpoint_path = os.path.join(cfg.model.lvae_model_path, 'model_best.pt')
         if not os.path.exists(lvae_checkpoint_path):
@@ -748,7 +764,7 @@ def main(cfg: DictConfig):
     # Compile model BEFORE loading checkpoint to ensure optimizer parameter references are correct
     if cfg.compile_model:
         print0("Compiling model (before checkpoint loading to preserve optimizer parameter references).", logfile, console=True)
-        model = torch.compile(model, dynamic=False)
+        # model = torch.compile(model, dynamic=False)
     else:
         print0("Skipping model compilation.", logfile, console=True)
 
@@ -817,7 +833,7 @@ def main(cfg: DictConfig):
                         world_size,
                         tokenizer=tokenizer,
                         untokenizer_gpt = untokenizer,
-                        use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+                        use_ar_decoding = use_ar_decoding, 
                         decoder_start_token_id = decoder_start_token_id, 
                         pad_token_id = tokenizer.pad_token_id,)
         if training_mode in ("lvae_bart", "lvae_t5", "lvae"):
@@ -944,7 +960,8 @@ def main(cfg: DictConfig):
             world_size,
             tokenizer=tokenizer,
             untokenizer_gpt=untokenizer,
-            use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+            use_ar_decoding = use_ar_decoding, 
+            # (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
             decoder_start_token_id = decoder_start_token_id, 
             pad_token_id = tokenizer.pad_token_id,
         )
@@ -957,7 +974,8 @@ def main(cfg: DictConfig):
             world_size,
             tokenizer=tokenizer,
             untokenizer_gpt = untokenizer,
-            use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+            use_ar_decoding = use_ar_decoding,
+            # (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
             decoder_start_token_id = decoder_start_token_id, 
             pad_token_id = tokenizer.pad_token_id,
         )
@@ -969,7 +987,8 @@ def main(cfg: DictConfig):
         world_size,
         tokenizer=tokenizer,
         untokenizer_gpt = untokenizer,
-        use_ar_decoding = (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
+        use_ar_decoding = use_ar_decoding, 
+        # (training_mode == "lvae_bart" or training_mode == "lvae_t5"), 
         decoder_start_token_id = decoder_start_token_id, 
         pad_token_id = tokenizer.pad_token_id,
     )
@@ -997,6 +1016,12 @@ def main(cfg: DictConfig):
 
     print0("Starting training...", logfile, console=True)
     
+    if master_process and training_mode == "cfm":
+        if cond_cfm: 
+            print0(f"Training Flow Matching w/ Conditioning", logfile, console=True)
+        else:
+            print0(f"Training Flow Matching w/o Conditioning", logfile, console=True)
+
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     log_t0 = time.perf_counter()
@@ -1080,7 +1105,7 @@ def main(cfg: DictConfig):
             
             # Reduce validation losses across all ranks
             val_loss_tensor = torch.tensor(val_loss, device=device)
-            if training_mode == 'lvae':
+            if training_mode in ('lvae', "lvae_bart", "lvae_t5"):
                 val_recon_loss_tensor = torch.tensor(val_recon_loss, device=device)
                 val_kld_loss_tensor = torch.tensor(val_kld_loss, device=device)
                 dist.all_reduce(val_recon_loss_tensor, op=dist.ReduceOp.AVG)
@@ -1162,9 +1187,6 @@ def main(cfg: DictConfig):
                     if not adam_only:
                         optimizer_checkpoint['ldlm_optimizer_muon'] = optimizer_muon.state_dict(),
                 
-
-
-
                 # Save per-rank optimizer states
                 torch.save(optimizer_checkpoint, results_folder / f"optimizer_rank{rank}.pt")
                 
@@ -1281,20 +1303,26 @@ def main(cfg: DictConfig):
                         num_gen_samples = 4
                         gen_steps = getattr(cfg, 'cfm_gen_steps', 50)
                         model_dtype = next(model.parameters()).dtype
-                        
-
 
                         batch = next(val_loader)
                         batch = {k: v.cuda() for k, v in batch.items()}
                         with torch.no_grad():
                             input_ids = batch["input_ids"][:4]
                             attn_mask = batch["attention_mask"][:4]
-    
-                            cond, trgt = input_ids.chunk(2, dim=-1)
-                            cond_mask, trgt_mask = attn_mask.chunk(2, dim=-1)
 
-                            latent_cond = lvae_model.get_latents(input_ids=cond, attention_mask=cond_mask, mu_only = True)
-                            latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+                            if cond_cfm:
+                                cond, trgt = input_ids.chunk(2, dim=-1)
+                                cond_mask, trgt_mask = attn_mask.chunk(2, dim=-1)
+                                
+                                latent_cond = lvae_model.get_latents(input_ids=cond, attention_mask=cond_mask, mu_only = True)
+                                latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+                            else:
+                                trgt = input_ids
+                                trgt_mask = attn_mask
+
+                                latent_cond = None
+                                latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+
 
 
                         latents = gen_cfm_samples(
@@ -1384,21 +1412,25 @@ def main(cfg: DictConfig):
 
                     bsz, s = batch['input_ids'].shape
 
-                    cond, trgt = batch['input_ids'].chunk(2, dim=-1)
-                    cond_mask, trgt_mask = batch.get('attention_mask').chunk(2, dim=-1)
+                    # Determine model dtype for CFM
+                    model_dtype = next(model.parameters()).dtype            
+                    if cond_cfm:
+                        cond, trgt = batch['input_ids'].chunk(2, dim=-1)
+                        cond_mask, trgt_mask = batch.get('attention_mask').chunk(2, dim=-1)
+                        
+                        latent_cond = lvae_model.get_latents(input_ids=cond, attention_mask=cond_mask, mu_only = True)
+                        latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+                        latent_cond = latent_cond.to(dtype=model_dtype)
+                    else: 
+                        trgt = batch['input_ids']
+                        trgt_mask = batch.get('attention_mask')
+                        
+                        latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
+                        latent_cond = None
 
-                    latent_cond = lvae_model.get_latents(input_ids=cond, attention_mask=cond_mask, mu_only = True)
-                    latent = lvae_model.get_latents(input_ids=trgt, attention_mask=trgt_mask, mu_only = True)
-
-
-
-                # Determine model dtype for CFM
-                model_dtype = next(model.parameters()).dtype
-
-                latent_cond = latent_cond.to(dtype=model_dtype)
                 latent = latent.to(dtype=model_dtype)
                 
-                x_0 = torch.randn_like(latent)
+                x_0 = torch.randn_like(latent)  # get init noise
                 t, x_t, u_t = flow_matcher.get_sample_location_and_conditional_flow(x_0, latent)
                 v_t = model(x_t, t, latent_cond)
                 loss = F.mse_loss(v_t.float(), u_t.float()) / cfg.grad_accumulate
