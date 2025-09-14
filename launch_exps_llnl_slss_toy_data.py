@@ -32,14 +32,15 @@ BANK = "effml"
 # BANK = "guard"
 TIME_LIMIT = 1440
 
-REPETITIONS = 1
-DEPENDENCY = None
-# REPETITIONS = 3
-# DEPENDENCY = "afterany"
+# REPETITIONS = 1
+# DEPENDENCY = None
+REPETITIONS = 5
+DEPENDENCY = "afterany"
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/ldlm/outputs"
 
-BASE_RUN_NAME = f"prod_slss_ds_abl"
+# BASE_RUN_NAME = f"prod_slss_ds_abl"
+BASE_RUN_NAME = f"prod_slss_long"
 
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
@@ -56,7 +57,7 @@ INDUCTOR_CACHE="/l/ssd/$USER"
 
 TGT_TOKENS = None
 # MAX_STEPS = 100e3
-MAX_STEPS = 200e3
+MAX_STEPS = 500e3
 
 TOK_WBSZ_1M = 8192 * 128
 TOK_WBSZ_4M = TOK_WBSZ_1M * 4
@@ -142,7 +143,8 @@ exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]
 
 # kld
 sweep_hparam = [
-   1e-5,
+#    1e-5,
+   1e-4,
 ]
 exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
 
@@ -153,14 +155,16 @@ sweep_hparam = [
     # "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin",
     # "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin",
     # ],
-    [
-    "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_train_*.bin",
-    "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_train_*.bin",
-    # "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_test_*.bin",
-    ],
+    # [
+    # "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_train_*.bin",
+    # "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_train_*.bin",
+    # # "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/rocstories_gpt2/roc_test_*.bin",
+    # 4111142, # toks in train
+    # ],
     [
     "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/tinystories_gpt2/tiny_train_*.bin",
     "/p/vast1/kirchenb/.cache/ldlm/binary_datasets/tinystories_gpt2/tiny_validation_*.bin",
+    473992006, # toks in train
     ],
 ]
 exp_list = list(chain(*[[exp + hp for hp in sweep_hparam] for exp in exp_list]))
@@ -192,6 +196,7 @@ for exp in final_exp_list:
         kld,
         tr_pattern,
         val_pattern,
+        toks_in_tr,
         # lvae_path, # will be auto selecting from final runname
     ) = exp
 
@@ -242,6 +247,7 @@ for exp in final_exp_list:
     if MAX_MEM is not None:
         cli_args += f" per_process_vram_ratio={MAX_MEM}"
 
+    # dataset stuff
     if "fineweb" in tr_pattern:
         ds_str = "fw100b-ds"
     elif "rocstories" in tr_pattern:
@@ -249,7 +255,8 @@ for exp in final_exp_list:
     elif "tinystories" in tr_pattern:
         ds_str = "tiny-ds"
     
-    cli_args += f" train_bin_pattern={tr_pattern} val_bin_pattern={val_pattern}"
+    # cli_args += f" train_bin_pattern={tr_pattern} val_bin_pattern={val_pattern}"
+    cli_args += f" train_bin_pattern={tr_pattern} val_bin_pattern={val_pattern} total_tokens={toks_in_tr}"
 
     # mod more things
     # ...
