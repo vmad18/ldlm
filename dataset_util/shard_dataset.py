@@ -1,8 +1,12 @@
 import argparse
+import json
+import glob
+import re
 from pathlib import Path
 from typing import Iterable, List, Optional, Union
 
 import numpy as np
+import torch
 from datasets import load_dataset, Dataset, DatasetDict
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
 from tqdm import tqdm
@@ -24,6 +28,20 @@ def _write_shard(out_path: Path, tokens_u16: np.ndarray):
         f.write(header.tobytes(order="C"))
         f.write(tokens_u16.tobytes(order="C"))
 
+# nearly same as _load_data_shard in dataset_helper.py
+def _get_token_count_in_file(file: Path):
+    header = torch.from_file(str(file), False, 256, dtype=torch.int32) # header is 256 int32
+    assert header[0] == 20240520, "magic number mismatch in the data .bin file"
+    assert header[1] == 1, "unsupported version"
+    num_tokens = int(header[2]) # number of tokens (claimed)
+    with file.open("rb", buffering=0) as f:
+        tokens = np.empty(num_tokens, dtype=np.uint16)
+        f.seek(256 * 4)
+        nbytes = f.readinto(tokens)
+        assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
+    return num_tokens
+
+
 def _flush(buf: np.ndarray,
            out_dir: Path,
            prefix: str,
@@ -40,6 +58,44 @@ def _flush(buf: np.ndarray,
             buf = np.concatenate([buf, np.full(pad, eos_id, dtype=np.uint16)], axis=0)
     _write_shard(out_dir / f"{prefix}_{split}_{shard_idx:05d}.bin", buf)
     return shard_idx + 1
+
+def _write_manifest(out_dir, prefix, split):
+    bin_file_pattern = f"{out_dir}/{prefix}_{split}_*.bin"
+    all_split_files_written = sorted(glob.glob(bin_file_pattern))
+    
+    num_shards = len(all_split_files_written)
+    num_tokens = 0
+    cts_per_shard = []
+    shard_names = []
+    
+    for filename in tqdm(all_split_files_written, desc="Reading all bin files written"):
+        filepath = Path(filename)
+        shard_names.append(filepath.name)
+        toks_this_shard = _get_token_count_in_file(filepath)
+        cts_per_shard.append(toks_this_shard)
+        num_tokens += toks_this_shard
+    
+    print(f"Counted {num_tokens} total tokens written into bin files matching {bin_file_pattern}")
+
+    manifest_path = out_dir / f"{prefix}_manifest.json"
+    manifest_data = {}
+
+    if Path(manifest_path).exists():
+        with open(manifest_path, "r") as fp:
+            manifest_data = json.load(fp)
+
+    assert split not in manifest_data, "shouldn't have duplicate split data"
+    manifest_data[split] = {
+        "num_tokens":num_tokens,
+        "num_shards":num_shards,
+        "tokens_per_shard": {k:v for k,v in zip(shard_names, cts_per_shard)}
+    }
+
+    with open(manifest_path, "w") as fp:
+        json.dump(manifest_data, fp, indent=4)
+    
+    print(f"Wrote manifest for split {split} at {manifest_path}")
+
 
 def build_bins_from_dataset(
     dataset: Union[str, Dataset, DatasetDict],
@@ -146,6 +202,9 @@ def build_bins_from_dataset(
 
         shard_idx = _flush(buf, out_dir, prefix, split, shard_idx, pad_to, eos_id)
         print(f"[{split}] wrote {shard_idx} shards to {out_dir}")
+
+        _write_manifest(out_dir, prefix, split)
+
 
 def _cli():
     ap = argparse.ArgumentParser()
