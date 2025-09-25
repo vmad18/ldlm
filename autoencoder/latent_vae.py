@@ -67,6 +67,7 @@ class LatentVAEModel(nn.Module):
                  qk_norm: bool = False, 
                  layers_p = 4,  
                  ctx = nullcontext(),
+                 regularizer: str = "kl",
                  dev: str = "cuda" if torch.cuda.is_available() else "cpu") -> None: 
         super().__init__()
 
@@ -78,7 +79,7 @@ class LatentVAEModel(nn.Module):
                                               expansion_factor=expansion_factor, use_rope=use_rope, 
                                               base=rope_base, qk_norm=qk_norm, layers_p=layers_p, dev=dev)
 
-        self.vae = VariationalAutoEncoder(cfg_enc, cfg_dec)
+        self.vae = VariationalAutoEncoder(cfg_enc, cfg_dec, regularizer = regularizer)
 
         self.embed = nn.Embedding(vocab_size, d_model, device=dev) 
         self.dembed_head = nn.Linear(d_model, vocab_size, device=dev)
@@ -87,6 +88,8 @@ class LatentVAEModel(nn.Module):
         self.dim = cfg_enc.dim
         self.latent_dim = cfg_enc.latent_dim
         self.num_latents = cfg_enc.num_latents
+
+        self.regularizer = regularizer
 
         self.max_tokens = cfg_enc.max_tokens
         self.freeze = ctx
@@ -112,9 +115,13 @@ class LatentVAEModel(nn.Module):
         if attn_mask is None: 
             attn_mask = torch.ones_like(input_ids)
 
-        recon_encs, mu, log_var = self.vae(embeddings, attn_mask.bool(), mu_only)
+        recon_encs, mu, log_var, z = self.vae(embeddings, attn_mask.bool(), mu_only)
         recon_encs = self.dembed_head(recon_encs[..., :s, :])
-        return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), input_ids.view(-1).to(torch.int64), mu, log_var)
+        return self.vae.discrete_loss_func(recon_encs.view(-1, self.vocab_size), 
+                                           input_ids.view(-1).to(torch.int64), 
+                                           mu, 
+                                           log_var, 
+                                           z,)
 
     def forward(self, input_ids: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> dict:
         return self.autoencode(input_ids, attn_mask)
@@ -144,6 +151,9 @@ def get_latent_vae_tokenizer(model_cfg) -> Tuple[LatentVAEModel, PreTrainedToken
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     def next_multiple_of_n(v: float | int, *, n: int):
         return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
+    
+    regularizer = getattr(model_cfg, "regularizer", "kld")
+    
     vae = LatentVAEModel(
         vocab_size = next_multiple_of_n(len(tokenizer), n=128),
         d_model = model_cfg.d_model, 
@@ -151,7 +161,8 @@ def get_latent_vae_tokenizer(model_cfg) -> Tuple[LatentVAEModel, PreTrainedToken
         num_latents = model_cfg.num_latents, 
         dim_head = model_cfg.dim_head, 
         max_tokens = model_cfg.max_seq_len, 
-        layers_p = model_cfg.num_layers) 
+        layers_p = model_cfg.num_layers,
+        regularizer = regularizer) 
     
     return vae, tokenizer 
 

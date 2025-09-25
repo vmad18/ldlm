@@ -407,6 +407,9 @@ def main(cfg: DictConfig):
         # LVAE training mode
         model, tokenizer = get_latent_vae_tokenizer(cfg.model)
         model = model.cuda()
+
+        print0(f"(INFO) Using {cfg.model.regularizer} regularizer", logfile = logfile, console = True)
+
         # Initialize CFM-related variables as None
         flow_matcher = None
         lvae_model = None
@@ -649,12 +652,12 @@ def main(cfg: DictConfig):
                 return cfg.kld_weight
         return 1.0  # Default for CFM training
 
-    if cfg.startup_only:
-        dist.barrier()
-        wandb.finish()
-        print0("Startup test complete, exiting early...", logfile, console=True)
-        dist.destroy_process_group()
-        exit(0)
+    # if cfg.startup_only:
+    #     dist.barrier()
+    #     wandb.finish()
+    #     print0("Startup test complete, exiting early...", logfile, console=True)
+    #     dist.destroy_process_group()
+    #     exit(0)
 
     print0("Starting training...", logfile, console=True)
     
@@ -836,7 +839,7 @@ def main(cfg: DictConfig):
                         attn_mask = batch["attention_mask"][:4]
                         
                         embeddings = model.embed(input_ids)
-                        recon_embeds, _, _ = model.vae(embeddings, attn_mask.bool())
+                        recon_embeds, *_ = model.vae(embeddings, attn_mask.bool())
                         recon_logits = model.dembed_head(recon_embeds[..., :input_ids.shape[1], :])
                         recon_ids = torch.argmax(recon_logits, dim=-1)
                         
@@ -851,6 +854,8 @@ def main(cfg: DictConfig):
                         # Generation samples
                         num_gen_samples = 4
                         latents = torch.randn((num_gen_samples, model.num_latents, model.latent_dim), device=device)
+                        if cfg.model.regularizer == "shell":
+                            latents = latents / (latents.norm(dim = -1, keepdim = True) + 1e-6)
                         gen_logits = model.decode_latent(latents)
                         gen_ids = torch.argmax(gen_logits, dim=-1)
                         generated_texts = tokenizer.batch_decode(gen_ids.cpu(), skip_special_tokens=True)

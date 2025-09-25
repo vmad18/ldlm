@@ -245,7 +245,11 @@ class PerceiverResampler(nn.Module):
 
 
 class VariationalAutoEncoder(nn.Module):
-    def __init__(self, cfg_enc: Config, cfg_dec: Config, create_encoder: bool = True) -> None:
+    def __init__(self, 
+                 cfg_enc: Config, 
+                 cfg_dec: Config, 
+                 create_encoder: bool = True,
+                 regularizer: str = "kl") -> None:
         super().__init__()
         if create_encoder:
             self.encoder = PerceiverResampler(cfg_enc)
@@ -255,8 +259,11 @@ class VariationalAutoEncoder(nn.Module):
             self.mu_lsigma = None
 
         self.decoder = PerceiverResampler(cfg_dec)
+        self.regularizer = regularizer
 
-    def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, 
+               x: torch.Tensor, 
+               mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encodes the input and returns the mean and log-variance vectors."""
         if self.encoder is None:
             raise ValueError("Cannot encode without an encoder. Model was initialized with create_encoder=False.")
@@ -269,40 +276,88 @@ class VariationalAutoEncoder(nn.Module):
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor, mu_only: bool = False) -> torch.Tensor:
         """Reparameterizes the latent space. If only_mu is True, returns the mean."""
         if mu_only:
-            return mu
-        std = torch.exp(0.5 * log_var)  
-        eps = torch.randn_like(std)     
-        return mu + eps * std           # compute the latent vector z
+            z = mu
+        else:
+            std = torch.exp(0.5 * log_var)  
+            eps = torch.randn_like(std)     
+            z = mu + eps * std
+        
+        if self.regularizer == "shell":
+            assert z.shape[-2] == 1, f"(ERROR!) Shell method only designed for single latent models!"
+            z = z / (z.norm(dim = -1, keepdim = True) + 1e-6) # restrict z to the surface of a shell
+            assert z.shape == mu.shape, f"(ERROR!) Latent shape is inconsistent! Should have been {mu.shape}, but was {z.shape}."
+
+        return z           # compute the latent vector z
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
         """Decodes latents back into the embedding space."""
         return self.decoder(latents)
 
-    def discrete_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+    def discrete_loss_func(self, 
+                           recon_x: torch.Tensor, 
+                           x: torch.Tensor, 
+                           mu: torch.Tensor, 
+                           log_var: torch.Tensor,
+                           z: Optional[torch.Tensor] = None,) -> dict:
         recon_loss = F.cross_entropy(recon_x, x) # F.mse_loss(recon_x, x, reduction='sum')
+        if self.regularizer == "shell":
+            # force all batch latents to be orthogonal
 
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
+            if z is None:
+                z = mu + torch.randn_like(log_var) * torch.exp(0.5 * log_var)
+                z = z / (z.norm(dim = -1, keepdim = True) + 1e-6)
+            assert z.shape[-2] == 1, f"(ERROR!) Shell method only designed for single latent settings!"
+            
+            z = z.squeeze(-2)
+            sim = z @ z.T
+            dist_mat = sim.clamp(-1, 1) # (1.0 - sim).clamp(min = 0.0)
+            kld_loss = dist_mat.pow(2).mean() # 1.0 - dist_mat.mean()
+        else:
+            # default to standard kld
+            kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=(1, 2)).mean()
 
         total_loss = recon_loss + kld_loss
-        
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
 
-    def cont_loss_func(self, recon_x: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> dict:
+    def cont_loss_func(self, 
+                       recon_x: torch.Tensor, 
+                       x: torch.Tensor, 
+                       mu: torch.Tensor, 
+                       log_var: torch.Tensor,
+                       z: Optional[torch.Tensor] = None,) -> dict:
         if recon_x.shape != x.shape:
             print(f"[VAE ERROR] Shape mismatch in loss calculation:")
             print(f"  --> recon_x shape: {recon_x.shape}")
             print(f"  --> x shape:       {x.shape}")
+
         recon_loss = F.mse_loss(recon_x, x, reduction='mean')
-        kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        if self.regularizer == "shell":
+            # force all batch latents to be orthogonal
+            if z is None:
+                z = mu + torch.randn_like(log_var) * torch.exp(0.5 * log_var)
+                z = z / (z.norm(dim = -1, keepdim = True) + 1e-6)
+            assert z.shape[-2] == 1, f"(ERROR!) Shell method only designed for single latent settings!"
+            
+            z = z.squeeze(1)
+            sim = z @ z.T
+            dist_mat = sim.clamp(-1.0, 1.0) # (1.0 - sim).clamp(min = 0.0)
+            kld_loss = dist_mat.pow(2).mean() # 1.0 - dist_mat.mean()
+        else:
+            # default to standard kld
+            kld_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        
         total_loss = recon_loss + kld_loss
         
         return {'total_loss': total_loss, 'reconstruction_loss': recon_loss, 'kld_loss': kld_loss}
     
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, 
+                x: torch.Tensor, 
+                mask: Optional[torch.Tensor] = None, 
+                mu_only: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_var = self.encode(x, mask)
         z = self.reparameterize(mu, log_var, mu_only)
         recon_x = self.decode(z)
-        return recon_x, mu, log_var
+        return recon_x, mu, log_var, z
 
 
 if __name__ == "__main__":

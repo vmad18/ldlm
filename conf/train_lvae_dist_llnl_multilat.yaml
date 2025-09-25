@@ -8,12 +8,13 @@ training_mode: lvae
 model:
   vocab_size: 50257
   d_model: 768
-  latent_dim: 2048
+  latent_dim: 1536
   num_latents: 8
   dim_head: 128
   max_seq_len: 128
   num_layers: 12
   tokenizer_name: "gpt2"
+  regularizer: "shell"
 
 # Training configuration
 train_num_steps: 100000
@@ -26,8 +27,8 @@ resume_from: null
 results_folder: null
 
 # Data configuration
-train_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_train_*.bin"
-val_bin_pattern: "/p/vast1/kirchenb/.cache/ldlm/datasets/fineweb100B/fineweb_val_*.bin"
+train_bin_pattern: "/p/vast1/pretrain/datasets/diffusion/fineweb100B/fineweb_train_*.bin"
+val_bin_pattern: "/p/vast1/pretrain/datasets/diffusion/fineweb100B/fineweb_val_*.bin"
 total_tokens: 100000000000  # 100B tokens
 
 # Optimization configuration
@@ -47,6 +48,7 @@ seed: 42
 log_step_interval: 1
 output_dir: "outputs"
 wandb_name: "lvae-distributed"
+wandb_mode: "online"
 save_checkpoint: true
 
 # Cluster shenanigans
